@@ -1,0 +1,24 @@
+# Precomputed data cache — fast to regenerate (py -3 precompute.py ALL),
+# not worth versioning (unlike RCTBE's HMM precompute, which IS committed
+# there because a 10-15 min walk-forward refit per asset is genuinely
+# expensive to redo).
+mr_precomputed_*.parquet
+
+# Search working state — regenerable from a resumed/rerun search.
+# top_strategies.json is the one file worth committing deliberately if a
+# specific result is worth preserving (not gitignored by the line below).
+meanreversion_output*/run.log
+meanreversion_output*/checkpoint.json
+meanreversion_output*/checkpoint.json.tmp
+meanreversion_output*/DONE
+meanreversion_output*/results.csv
+meanreversion_output_stale_*/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
