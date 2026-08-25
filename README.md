@@ -26,10 +26,15 @@ happens there.
 - **Distance to trade**: only once price is at least `deviation_
   threshold_atr` ATRs away from the *current* fair value. `atr_window`
   itself is swept (14/30/60/120 min).
-- **Entry — break of structure**: while extended, wait for price to
-  close beyond the nearest confirmed swing point (K=3 fractal) within a
-  trailing `bos_lookback_bars` window, held for `bos_confirm_bars`
-  consecutive closes. Entry = that bar's close.
+- **Entry — break of structure**: while extended (deviation condition
+  true at any point in the trailing `extension_lookback_bars` window,
+  not necessarily the exact same bar as the break itself — see below),
+  wait for price to close beyond the nearest structure within a trailing
+  `bos_lookback_bars` window, held for `bos_confirm_bars` consecutive
+  closes. Two swept `bos_mode`s define "structure": `fractal` (the
+  nearest confirmed K=3 swing point — the original design) or
+  `raw_wick` (the raw high/low — the wick — of any bar in the lookback
+  window, no fractal filter). Entry = that bar's close.
 - **Stop-loss**: structural — the raw high/low extreme of the same
   lookback window, buffered by `k_buf` * ATR, clamped to
   `[k_floor, k_cap]` * ATR.
@@ -38,9 +43,22 @@ happens there.
 - **Exit**: a wall-clock horizon (`exit_horizon_bars`), plus an optional
   session-close cap.
 - **Also swept**: `direction`, `skip_weekday`, `session_start_h`/
-  `session_window_h` (hours of trading).
+  `session_window_h` (hours of trading), `bos_mode`,
+  `extension_lookback_bars`.
 
-Full design rationale is in `mean_reversion.py`'s module docstring.
+Full design rationale is in `mean_reversion.py`'s module docstring,
+including a 2026-08-25 note on a frequency fix: the original design's
+top search survivors were producing only ~30 trades per ~9-month period
+(roughly one every 7-10 days) — nowhere near the "many trades a day" a
+1-minute strategy is meant to produce. Root causes were (1) requiring
+the deviation-from-fair-value condition on the *exact same bar* as the
+BOS confirmation, which a chasing fair-value anchor (see the
+`consolidation_atr_mult` note below) made increasingly rare, and (2)
+`bos_lookback_bars` never exploring truly 1-minute-scale windows.
+`extension_lookback_bars` and `bos_mode: raw_wick` fix both, and
+`MIN_TRADES_PER_PERIOD`/the score's trade-count term were raised
+alongside them so the search actually gets rewarded for finding
+higher-frequency setups instead of stopping at 30/period.
 
 Default asset universe (`precompute.py`'s `INDEX_ASSETS`): NDX100,
 SPX500, US30, GER40, FRA40, UK100, JPN225.
@@ -57,7 +75,10 @@ year count so this is visible every run, not just in this README.
 ## Validation standard (matches RCTBE, not a looser bar)
 
 1. **Accept gate** (built into the search): profitable in >=4 of 5
-   chronological walk-forward periods, >=100 trades total, >=8/period.
+   chronological walk-forward periods, >=200 trades total, >=40/period
+   (raised 2026-08-25 from 100/8 — see `mean_reversion.py`'s docstring;
+   a first, moderate step toward the "many trades a day" brief, not a
+   final target).
 2. **`MR_IS_ONLY=1`** (default ON): every asset is truncated to periods
    1-3 (first 60% of history) *before the search ever sees it*. This is
    the fix RCTBE's own project history calls the "new methodology"

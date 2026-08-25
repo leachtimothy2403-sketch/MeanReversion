@@ -26,14 +26,16 @@ import json
 
 import mean_reversion as mr
 
-# "direction" excluded (categorical — flipping it tests a different
-# economic hypothesis, not neighborhood robustness of this one; the
-# search sweeping it already answers "does the other side also work").
+# "direction" and "bos_mode" excluded (categorical — flipping either
+# tests a different economic hypothesis, not neighborhood robustness of
+# this one; the search sweeping them already answers "does the other
+# mode/side also work"). "extension_lookback_bars" added 2026-08-25
+# alongside bos_mode/raw_wick — see mean_reversion.py's docstring.
 PERTURBABLE = [
     "atr_window", "consolidation_bars", "consolidation_atr_mult",
     "deviation_threshold_atr", "bos_lookback_bars", "bos_confirm_bars",
-    "target_fraction", "exit_horizon_bars", "k_buf", "k_cap", "k_floor",
-    "session_start_h", "session_window_h",
+    "extension_lookback_bars", "target_fraction", "exit_horizon_bars",
+    "k_buf", "k_cap", "k_floor", "session_start_h", "session_window_h",
 ]
 
 

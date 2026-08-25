@@ -32,6 +32,7 @@ Usage:
     .\start_search_4x.ps1                  # all 4 groups, 100,000-iteration ceiling
     .\start_search_4x.ps1 -Iterations 50000
     .\start_search_4x.ps1 -RunIds 2,3,4    # skip group 1 (e.g. to cut memory load)
+    .\start_search_4x.ps1 -OutputSuffix v2 # fresh campaign, doesn't touch existing output dirs
 
 -RunIds lets you launch a subset of the groups below -- each launched
 process only loads its OWN group's assets into memory (via
@@ -43,7 +44,15 @@ checkpoint either way (see below), so partial runs are never wasted.
 
 Every run auto-resumes from its own checkpoint.json if one exists, so
 this script is also the restart command after a crash or a stop -- no
-separate "resume" step needed.
+separate "resume" step needed. IMPORTANT: that auto-resume is why
+-OutputSuffix exists -- if mean_reversion.py's own SPACE/scoring logic
+has changed (a new swept parameter, a changed threshold) since a given
+output dir's checkpoint was written, resuming into it mixes candidates
+scored under two different rules in the same top_strategies.json/
+checkpoint.json. Use a new -OutputSuffix any time you've changed the
+strategy code itself, so the new campaign starts clean in its own
+meanreversion_output_run<N>_<suffix> dirs and the old results stay
+untouched for comparison.
 
 Stop everything:
     Get-Process -Name py -ErrorAction SilentlyContinue | Stop-Process
@@ -56,7 +65,8 @@ Stop everything:
 
 param(
     [int]$Iterations = 100000,
-    [int[]]$RunIds = @(1, 2, 3, 4)
+    [int[]]$RunIds = @(1, 2, 3, 4),
+    [string]$OutputSuffix = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,21 +94,23 @@ if ($groups.Count -eq 0) {
     exit 1
 }
 
+$suffixTag = if ($OutputSuffix) { "_$OutputSuffix" } else { "" }
 Write-Host "Launching $($groups.Count) of 4 parallel searches (ids: $($groups.id -join ',')), $Iterations iterations each (ceiling -- stop manually with Ctrl+C or Stop-Process once your time budget is up)."
+if ($OutputSuffix) { Write-Host "Output suffix '$OutputSuffix' -- fresh campaign, existing output dirs untouched." }
 
 foreach ($g in $groups) {
     $env:MR_ASSET_FILTER = $g.assets
-    $env:MR_OUTPUT_DIR   = "meanreversion_output_run$($g.id)"
+    $env:MR_OUTPUT_DIR   = "meanreversion_output_run$($g.id)$suffixTag"
     $env:MR_ITERATIONS   = "$Iterations"
 
-    $log    = Join-Path $root "run$($g.id)_console.log"
-    $errlog = Join-Path $root "run$($g.id)_console.err.log"
+    $log    = Join-Path $root "run$($g.id)$suffixTag`_console.log"
+    $errlog = Join-Path $root "run$($g.id)$suffixTag`_console.err.log"
 
     Start-Process -FilePath "py" -ArgumentList @("-3", "mean_reversion.py") `
         -WorkingDirectory $root -WindowStyle Hidden `
         -RedirectStandardOutput $log -RedirectStandardError $errlog
 
-    Write-Host "  [run$($g.id)] assets=$($g.assets) -> $log"
+    Write-Host "  [run$($g.id)$suffixTag] assets=$($g.assets) -> $log"
 }
 
 Start-Sleep -Seconds 5

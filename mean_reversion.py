@@ -28,20 +28,58 @@ Design (translates the user's brief into swept, backtestable rules):
     — see generate_signals.
 
   - Distance to trade. `deviation_threshold_atr` (swept) — trade only
-    once price is at least that many ATRs away from the CURRENT fair
-    value. Below fair value by more than the threshold = "extended
-    below" (looking to buy back toward it); above = "extended above"
-    (looking to sell back toward it). ATR window itself is swept
-    (`atr_window`, selecting among 4 precomputed windows) since it
-    governs both this threshold and the stop distance below.
+    once price has been at least that many ATRs away from the CURRENT
+    fair value within the trailing `extension_lookback_bars` window (not
+    necessarily on the exact same bar as the BOS confirmation — see
+    2026-08-25 note below). Below fair value = "extended below" (looking
+    to buy back toward it); above = "extended above" (looking to sell
+    back toward it). ATR window itself is swept (`atr_window`, selecting
+    among 4 precomputed windows) since it governs both this threshold
+    and the stop distance below.
 
-  - Entry signal: a break of structure. While extended, wait for price
-    to close beyond the nearest CONFIRMED swing point (K=3 fractal, see
-    precompute.py) within a trailing `bos_lookback_bars` window, held
-    for `bos_confirm_bars` consecutive closes (both swept) — i.e., a
-    genuine break of the local structure in the direction back toward
-    fair value, not just a touch. Rising-edge only. Entry price is that
-    confirmation bar's close.
+  - Entry signal: a break of structure, on one of two swept `bos_mode`s:
+      "fractal"  — price closes beyond the nearest CONFIRMED swing point
+                   (K=3 fractal, see precompute.py) within a trailing
+                   `bos_lookback_bars` window (original design).
+      "raw_wick" — price closes beyond the raw high/low (the WICK, not a
+                   filtered fractal) of any bar in the trailing
+                   `bos_lookback_bars` window — added 2026-08-25, see
+                   note below.
+    Either way: held for `bos_confirm_bars` consecutive closes (swept),
+    rising-edge only (fires once per breakout episode, not every bar
+    while still beyond). Entry price is that confirmation bar's close.
+
+    2026-08-25 — frequency fix. The original design produced ~30 trades
+    per ~9-month walk-forward period (roughly one every 7-10 days) on
+    the top search survivors, nowhere near the "many trades a day" the
+    strategy was meant to produce on 1-minute bars. Two root causes,
+    fixed together:
+      1. BOS and the deviation-from-fair-value condition were required
+         on the EXACT SAME bar (buy_cand = bos_up & extended_below, both
+         indexed identically). Since fair value can itself be sliding
+         toward price throughout an extension (see the consolidation fix
+         below), the deviation condition often collapsed back under
+         threshold by the time a multi-bar BOS confirmation completed a
+         few minutes later — two already-narrow conditions had to land
+         on the identical minute. Fixed by adding `extension_lookback_
+         bars` (swept): the deviation condition now only needs to have
+         been true at ANY point in that trailing window, not on the BOS
+         bar itself.
+      2. `bos_lookback_bars`'s swept range started at 5 (minutes) and
+         the "fractal" mode's swing points are themselves K=3-bar
+         smoothed/lagged features — genuinely 1-minute-scale structure
+         (the immediately preceding candle or two) was never explorable.
+         Fixed by widening the shared grid down to 1-3 bars and adding
+         the "raw_wick" bos_mode per the user's own definition: a candle
+         closing beyond the wick (raw high/low, no fractal filter) of a
+         previous candle IS a break of structure, evaluated on whatever
+         small `bos_lookback_bars` window the search picks. Both modes
+         are swept side by side (not a hard swap) so the search itself
+         can show which one actually produces a validated edge, rather
+         than trading one unverified assumption for another.
+    See also the `MIN_TRADES_*`/score-cap note further down — the
+    accept gate and scoring previously had almost no incentive to prefer
+    higher-frequency setups once a candidate cleared a trivially low bar.
 
   - Stop-loss: structural — anchored to the raw high/low extreme of the
     SAME `bos_lookback_bars` window (the extent of the move being
@@ -58,7 +96,17 @@ Design (translates the user's brief into swept, backtestable rules):
     horizon. Optional session-close cap (`use_session_close`).
 
   - Also swept: `direction` (Buy/Sell/Both), `skip_weekday`,
-    `session_start_h`/`session_window_h` (hours of trading).
+    `session_start_h`/`session_window_h` (hours of trading), `bos_mode`
+    and `extension_lookback_bars` (see 2026-08-25 note above).
+
+  - `consolidation_atr_mult`'s grid ceiling was lowered from 2.0 to 1.5
+    on 2026-08-25: the top two search survivors reviewed that day both
+    sat at the old 2.0 ceiling, which lets the fair-value anchor reset
+    on almost any brief pause — closer to continuously chasing price
+    than the "day-open anchor, occasionally refreshed at a genuine
+    consolidation" concept from the original brief. A chasing anchor
+    also shrinks the deviation-from-fair-value reading throughout an
+    extension, compounding the same-bar timing issue fixed above.
 
 VALIDATION STANDARD — matches the sister project's own bar, not a looser
 one built for this project specifically:
@@ -81,8 +129,20 @@ one built for this project specifically:
     there's no reason to default to the leakier version — set
     MR_IS_ONLY=0 only if you deliberately want the old (leakier)
     behavior for a specific comparison.
-  - Every candidate needs >=100 trades total (MIN_TRADES_TOTAL) and
-    >=8/period (MIN_TRADES_PER_PERIOD) to be scored at all.
+  - Every candidate needs >=200 trades total (MIN_TRADES_TOTAL) and
+    >=40/period (MIN_TRADES_PER_PERIOD) to be scored at all — raised
+    2026-08-25 from the original 100/8. At the original bar, ~30 trades
+    across an ~8-9 month period (roughly one every 7-10 days) was enough
+    to clear the accept gate, which is nowhere near the "many trades a
+    day" the strategy is meant to produce on 1-minute bars, and gave the
+    search no real reason to prefer higher-frequency parameter regions.
+    The score formula's own trade-count term was capped at just 30/
+    period too (see backtest_multiperiod) — raised alongside this so a
+    candidate keeps getting rewarded for more trades well past that
+    point instead of plateauing at a frequency far below the brief's
+    intent. Both numbers are a first, moderate step, not a final
+    target — worth raising further once the bos_mode/extension_lookback
+    changes above show how much real frequency is achievable.
 
 Performance note: unlike a regime-conditioned strategy, nothing here
 needs a per-iteration HMM refit. What IS computed fresh per iteration
@@ -138,8 +198,11 @@ IS_ONLY_SEARCH = os.environ.get("MR_IS_ONLY", "1").lower() in ("1", "true", "yes
 N_PERIODS_SEARCH      = 5
 MAX_WEAK_PERIODS      = 1
 MIN_PERIODS_PASS      = N_PERIODS_SEARCH - MAX_WEAK_PERIODS   # 4
-MIN_TRADES_TOTAL      = 100
-MIN_TRADES_PER_PERIOD = 8
+# Raised 2026-08-25 from 100/8 — see module docstring's VALIDATION
+# STANDARD section for why the original bar let low-frequency candidates
+# (far below the "many trades a day" brief) clear the accept gate.
+MIN_TRADES_TOTAL      = 200
+MIN_TRADES_PER_PERIOD = 40
 TOP_N                 = 100
 CHECKPOINT_EVERY      = 500
 CHECKPOINT_SECONDS    = 1800
@@ -158,10 +221,12 @@ DATA_DIR = os.environ.get("MR_DATA_DIR", ".")
 SPACE = {
     "atr_window":              ATR_WINDOWS,                       # feeds deviation threshold + stop distance
     "consolidation_bars":      [5, 8, 13, 20, 30, 45],             # fair-value update sensitivity (window)
-    "consolidation_atr_mult":  [0.5, 0.75, 1.0, 1.5, 2.0],         # fair-value update sensitivity (tightness)
+    "consolidation_atr_mult":  [0.5, 0.75, 1.0, 1.25, 1.5],        # fair-value update sensitivity (tightness) — ceiling lowered from 2.0 2026-08-25, see docstring
     "deviation_threshold_atr": [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0],# distance from fair value to start trading
-    "bos_lookback_bars":       [5, 8, 13, 20, 30, 45, 60],         # signal to enter — how far back to look for structure
+    "bos_mode":                ["fractal", "raw_wick"],            # added 2026-08-25 — see docstring's frequency-fix note
+    "bos_lookback_bars":       [1, 2, 3, 5, 8, 13, 20, 30, 45, 60],# widened down to 1-3 2026-08-25 for genuine 1-minute-scale structure
     "bos_confirm_bars":        [1, 2, 3, 5],                      # signal to enter — how convincing the break must be
+    "extension_lookback_bars": [1, 3, 5, 10, 20],                  # added 2026-08-25 — deviation no longer required on the exact BOS bar, see docstring
     "target_fraction":         [0.5, 0.75, 1.0, 1.25],             # TP: how far back toward fair value
     "exit_horizon_bars":       [15, 30, 60, 90, 120, 180, 240, 360],
     "use_session_close":       [False, True],
@@ -239,12 +304,30 @@ def generate_signals(df: pd.DataFrame, p: dict) -> List[dict]:
     extended_below = deviation_atr <= -threshold   # too cheap -> looking to BUY back toward fair value
     extended_above = deviation_atr >= threshold     # too rich -> looking to SELL back toward fair value
 
+    # Extension no longer has to land on the exact same bar as the BOS
+    # confirmation (added 2026-08-25 — see module docstring's frequency-
+    # fix note): true if extended at ANY point in the trailing
+    # extension_lookback_bars window, inclusive of the current bar.
+    ext_lookback = p.get("extension_lookback_bars", 1)
+    extended_below_recent = extended_below.rolling(ext_lookback, min_periods=1).max().astype(bool)
+    extended_above_recent = extended_above.rolling(ext_lookback, min_periods=1).max().astype(bool)
+
     # --- break of structure ---
     bos_lookback = p["bos_lookback_bars"]
     confirm_bars = p["bos_confirm_bars"]
+    bos_mode = p.get("bos_mode", "fractal")
 
-    recent_swing_high = df["swing_high_confirmed"].rolling(bos_lookback, min_periods=1).max()
-    recent_swing_low = df["swing_low_confirmed"].rolling(bos_lookback, min_periods=1).min()
+    if bos_mode == "raw_wick":
+        # Added 2026-08-25, per the user's own definition: a candle
+        # closing beyond the WICK (raw high/low, no fractal filter) of a
+        # previous candle within the trailing bos_lookback_bars window IS
+        # a break of structure — genuine 1-minute-scale structure, not a
+        # K=3-bar-smoothed fractal. See module docstring.
+        recent_swing_high = high_s.rolling(bos_lookback, min_periods=1).max()
+        recent_swing_low = low_s.rolling(bos_lookback, min_periods=1).min()
+    else:
+        recent_swing_high = df["swing_high_confirmed"].rolling(bos_lookback, min_periods=1).max()
+        recent_swing_low = df["swing_low_confirmed"].rolling(bos_lookback, min_periods=1).min()
 
     beyond_up = close_s > recent_swing_high
     beyond_down = close_s < recent_swing_low
@@ -254,8 +337,8 @@ def generate_signals(df: pd.DataFrame, p: dict) -> List[dict]:
     bos_up = (beyond_up_confirmed & ~beyond_up_confirmed.shift(1, fill_value=False)).to_numpy()
     bos_down = (beyond_down_confirmed & ~beyond_down_confirmed.shift(1, fill_value=False)).to_numpy()
 
-    buy_cand = bos_up & extended_below.to_numpy()
-    sell_cand = bos_down & extended_above.to_numpy()
+    buy_cand = bos_up & extended_below_recent.to_numpy()
+    sell_cand = bos_down & extended_above_recent.to_numpy()
 
     direction = p["direction"]
     if direction == "Buy":
@@ -485,7 +568,11 @@ def backtest_multiperiod(df: pd.DataFrame, p: dict) -> Optional[dict]:
     consistency = 1.0 / (1.0 + ret_std / (abs(avg_ret) + 1e-9))
     calmar = avg_ret / (ret_std + 1e-9)
     pf_component = 0.4 * min(avg_pf, 5.0) + 0.6 * min(min_pf, 5.0)
-    score = pf_component * (consistency ** 2) * min(avg_n / 15.0, 2.0) * max(calmar, 0)
+    # avg_n divisor raised 15.0 -> 50.0 2026-08-25 (cap: 30/period ->
+    # 100/period) — the old cap gave the search zero extra reward for
+    # trade counts above 30/period, far below the "many trades a day"
+    # brief. See module docstring / MIN_TRADES_* comment above.
+    score = pf_component * (consistency ** 2) * min(avg_n / 50.0, 2.0) * max(calmar, 0)
 
     wfe = None
     if len(valid) == N_PERIODS_SEARCH:
