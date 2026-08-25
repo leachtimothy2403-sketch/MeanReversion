@@ -29,8 +29,21 @@ you want that built instead; it's a different (well-trodden, low-risk)
 mechanism, not a reason to reach for WMI.
 
 Usage:
-    .\start_search_4x.ps1                  # uses the defaults below
+    .\start_search_4x.ps1                  # all 4 groups, 100,000-iteration ceiling
     .\start_search_4x.ps1 -Iterations 50000
+    .\start_search_4x.ps1 -RunIds 2,3,4    # skip group 1 (e.g. to cut memory load)
+
+-RunIds lets you launch a subset of the groups below -- each launched
+process only loads its OWN group's assets into memory (via
+MR_ASSET_FILTER), so dropping a group proportionally cuts total RAM use
+across the whole machine, not just that one process's share. Re-run with
+the full set (or just the dropped group's id) later to pick up the
+assets you skipped -- each run resumes independently from its own
+checkpoint either way (see below), so partial runs are never wasted.
+
+Every run auto-resumes from its own checkpoint.json if one exists, so
+this script is also the restart command after a crash or a stop -- no
+separate "resume" step needed.
 
 Stop everything:
     Get-Process -Name py -ErrorAction SilentlyContinue | Stop-Process
@@ -42,7 +55,8 @@ Stop everything:
 #>
 
 param(
-    [int]$Iterations = 100000
+    [int]$Iterations = 100000,
+    [int[]]$RunIds = @(1, 2, 3, 4)
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,14 +71,20 @@ $root = $PSScriptRoot
 # equal asset COUNT. Based on the IS-only-truncated bar counts observed
 # 2026-08 (~1.1-1.7M bars/asset); rebalance if a future precompute run
 # shows materially different sizes.
-$groups = @(
+$allGroups = @(
     @{ id = 1; assets = "NDX100,FRA40" }
     @{ id = 2; assets = "SPX500,UK100" }
     @{ id = 3; assets = "US30,GER40" }
     @{ id = 4; assets = "JPN225" }
 )
+$groups = $allGroups | Where-Object { $RunIds -contains $_.id }
 
-Write-Host "Launching $($groups.Count) parallel searches, $Iterations iterations each (ceiling -- stop manually with Ctrl+C or Stop-Process once your time budget is up)."
+if ($groups.Count -eq 0) {
+    Write-Error "No groups matched -RunIds $($RunIds -join ','). Valid ids are 1-4."
+    exit 1
+}
+
+Write-Host "Launching $($groups.Count) of 4 parallel searches (ids: $($groups.id -join ',')), $Iterations iterations each (ceiling -- stop manually with Ctrl+C or Stop-Process once your time budget is up)."
 
 foreach ($g in $groups) {
     $env:MR_ASSET_FILTER = $g.assets
