@@ -33,6 +33,14 @@ Usage:
     .\start_search_4x.ps1 -Iterations 50000
     .\start_search_4x.ps1 -RunIds 2,3,4    # skip group 1 (e.g. to cut memory load)
     .\start_search_4x.ps1 -OutputSuffix v2 # fresh campaign, doesn't touch existing output dirs
+    .\start_search_4x.ps1 -Asset NDX100 -NumWorkers 3 -OutputSuffix ndx100_focus
+                                            # -Asset overrides the group table entirely:
+                                            # NumWorkers identical processes, all searching
+                                            # only that one asset (higher combined throughput
+                                            # on it than splitting across the usual groups,
+                                            # and each process's memory footprint is just that
+                                            # one asset's data -- lighter than any multi-asset
+                                            # group above).
 
 -RunIds lets you launch a subset of the groups below -- each launched
 process only loads its OWN group's assets into memory (via
@@ -41,6 +49,7 @@ across the whole machine, not just that one process's share. Re-run with
 the full set (or just the dropped group's id) later to pick up the
 assets you skipped -- each run resumes independently from its own
 checkpoint either way (see below), so partial runs are never wasted.
+Ignored when -Asset is set.
 
 Every run auto-resumes from its own checkpoint.json if one exists, so
 this script is also the restart command after a crash or a stop -- no
@@ -66,7 +75,9 @@ Stop everything:
 param(
     [int]$Iterations = 100000,
     [int[]]$RunIds = @(1, 2, 3, 4),
-    [string]$OutputSuffix = ""
+    [string]$OutputSuffix = "",
+    [string]$Asset = "",
+    [int]$NumWorkers = 3
 )
 
 $ErrorActionPreference = "Stop"
@@ -87,7 +98,16 @@ $allGroups = @(
     @{ id = 3; assets = "US30,GER40" }
     @{ id = 4; assets = "JPN225" }
 )
-$groups = $allGroups | Where-Object { $RunIds -contains $_.id }
+if ($Asset) {
+    # Single-asset mode: NumWorkers identical processes all searching
+    # only this one asset -- multiplies combined throughput on it
+    # instead of splitting across the usual asset groups. Each process
+    # loads just this one asset's data, so this is lighter per-process
+    # than any of the multi-asset groups above.
+    $groups = 1..$NumWorkers | ForEach-Object { @{ id = $_; assets = $Asset } }
+} else {
+    $groups = $allGroups | Where-Object { $RunIds -contains $_.id }
+}
 
 if ($groups.Count -eq 0) {
     Write-Error "No groups matched -RunIds $($RunIds -join ','). Valid ids are 1-4."
@@ -95,7 +115,11 @@ if ($groups.Count -eq 0) {
 }
 
 $suffixTag = if ($OutputSuffix) { "_$OutputSuffix" } else { "" }
-Write-Host "Launching $($groups.Count) of 4 parallel searches (ids: $($groups.id -join ',')), $Iterations iterations each (ceiling -- stop manually with Ctrl+C or Stop-Process once your time budget is up)."
+if ($Asset) {
+    Write-Host "Launching $($groups.Count) parallel searches, all on $Asset only, $Iterations iterations each (ceiling -- stop manually with Ctrl+C or Stop-Process once your time budget is up)."
+} else {
+    Write-Host "Launching $($groups.Count) of 4 parallel searches (ids: $($groups.id -join ',')), $Iterations iterations each (ceiling -- stop manually with Ctrl+C or Stop-Process once your time budget is up)."
+}
 if ($OutputSuffix) { Write-Host "Output suffix '$OutputSuffix' -- fresh campaign, existing output dirs untouched." }
 
 foreach ($g in $groups) {
