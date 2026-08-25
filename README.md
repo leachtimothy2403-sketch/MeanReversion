@@ -55,10 +55,25 @@ the deviation-from-fair-value condition on the *exact same bar* as the
 BOS confirmation, which a chasing fair-value anchor (see the
 `consolidation_atr_mult` note below) made increasingly rare, and (2)
 `bos_lookback_bars` never exploring truly 1-minute-scale windows.
-`extension_lookback_bars` and `bos_mode: raw_wick` fix both, and
-`MIN_TRADES_PER_PERIOD`/the score's trade-count term were raised
-alongside them so the search actually gets rewarded for finding
-higher-frequency setups instead of stopping at 30/period.
+`extension_lookback_bars` and `bos_mode: raw_wick` fix both.
+
+A follow-up same-day fix (also 2026-08-25) caught a real bug in the
+first cut of `raw_wick`: its rolling swing-high/low window included the
+*current* bar, which makes `close > recent_swing_high` structurally
+impossible on any real OHLC bar (close can never exceed its own bar's
+high) — so `raw_wick` fired **zero trades, ever**, on real data, even
+though a synthetic-data check had (misleadingly) suggested it worked.
+Fixed by excluding the current bar from the window (`shift(1)` before
+the rolling max/min) — a real check against one year of 2024 NDX100
+1-minute data (`_real_ndx_trades_per_day.py`, not committed — ad hoc)
+confirmed the fix: 800 random param draws averaged a median of ~1.5
+trades/day, with 34% of draws clearing >=3/day, confirming the "2-3
+times a day" target is genuinely achievable on real price action.
+`MIN_TRADES_PER_PERIOD`/`MIN_TRADES_TOTAL` and the score's trade-count
+term were raised to match (see below and the module docstring) so the
+search is rewarded for finding higher-frequency setups all the way up
+toward that real target, not stopping at a floor set before real
+frequency was ever measured.
 
 Default asset universe (`precompute.py`'s `INDEX_ASSETS`): NDX100,
 SPX500, US30, GER40, FRA40, UK100, JPN225.
@@ -75,10 +90,12 @@ year count so this is visible every run, not just in this README.
 ## Validation standard (matches RCTBE, not a looser bar)
 
 1. **Accept gate** (built into the search): profitable in >=4 of 5
-   chronological walk-forward periods, >=200 trades total, >=40/period
-   (raised 2026-08-25 from 100/8 — see `mean_reversion.py`'s docstring;
-   a first, moderate step toward the "many trades a day" brief, not a
-   final target).
+   chronological walk-forward periods, >=500 trades total, >=100/period
+   (raised 2026-08-25 in two steps, 100/8 -> 200/40 -> 500/100 — see
+   `mean_reversion.py`'s docstring; the second raise follows a real
+   trades/day measurement on 2024 NDX100 data, not a guess. This is a
+   statistical-validity floor, not the 2-3/day target itself — the
+   score's trade-count term is what rewards approaching that).
 2. **`MR_IS_ONLY=1`** (default ON): every asset is truncated to periods
    1-3 (first 60% of history) *before the search ever sees it*. This is
    the fix RCTBE's own project history calls the "new methodology"

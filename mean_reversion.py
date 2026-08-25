@@ -129,20 +129,23 @@ one built for this project specifically:
     there's no reason to default to the leakier version — set
     MR_IS_ONLY=0 only if you deliberately want the old (leakier)
     behavior for a specific comparison.
-  - Every candidate needs >=200 trades total (MIN_TRADES_TOTAL) and
-    >=40/period (MIN_TRADES_PER_PERIOD) to be scored at all — raised
-    2026-08-25 from the original 100/8. At the original bar, ~30 trades
-    across an ~8-9 month period (roughly one every 7-10 days) was enough
-    to clear the accept gate, which is nowhere near the "many trades a
-    day" the strategy is meant to produce on 1-minute bars, and gave the
-    search no real reason to prefer higher-frequency parameter regions.
-    The score formula's own trade-count term was capped at just 30/
-    period too (see backtest_multiperiod) — raised alongside this so a
-    candidate keeps getting rewarded for more trades well past that
-    point instead of plateauing at a frequency far below the brief's
-    intent. Both numbers are a first, moderate step, not a final
-    target — worth raising further once the bos_mode/extension_lookback
-    changes above show how much real frequency is achievable.
+  - Every candidate needs >=500 trades total (MIN_TRADES_TOTAL) and
+    >=100/period (MIN_TRADES_PER_PERIOD) to be scored at all — raised
+    2026-08-25 in two steps: first 100/8 -> 200/40 (a moderate first
+    step, before any real-data measurement), then 200/40 -> 500/100 after
+    a real 2024 NDX100 check (_real_ndx_trades_per_day.py) both (a)
+    caught and fixed a bug that made bos_mode="raw_wick" fire ZERO trades
+    ever on real data (its BOS comparison was structurally impossible —
+    see generate_signals' raw_wick branch), and (b) confirmed that, once
+    fixed, the user's explicit "2-3 trades a day" target is genuinely
+    achievable: a median of ~1.5 trades/day and 34% of random param draws
+    clearing >=3/day across 800 draws on one real year of NDX100 data.
+    100/period is a statistical-validity floor (well below even a modest
+    ~0.5-1/day candidate over a ~500-trading-day walk-forward period),
+    not the target itself — the score formula's own trade-count term
+    (see backtest_multiperiod) is what actually rewards approaching
+    2-3/day, and its cap was raised alongside this to saturate around
+    1200 trades/period (~2.4/day) to match.
 
 Performance note: unlike a regime-conditioned strategy, nothing here
 needs a per-iteration HMM refit. What IS computed fresh per iteration
@@ -198,11 +201,21 @@ IS_ONLY_SEARCH = os.environ.get("MR_IS_ONLY", "1").lower() in ("1", "true", "yes
 N_PERIODS_SEARCH      = 5
 MAX_WEAK_PERIODS      = 1
 MIN_PERIODS_PASS      = N_PERIODS_SEARCH - MAX_WEAK_PERIODS   # 4
-# Raised 2026-08-25 from 100/8 — see module docstring's VALIDATION
-# STANDARD section for why the original bar let low-frequency candidates
-# (far below the "many trades a day" brief) clear the accept gate.
-MIN_TRADES_TOTAL      = 200
-MIN_TRADES_PER_PERIOD = 40
+# Raised 2026-08-25 from 100/8, then again same day from 200/40 — see
+# module docstring's VALIDATION STANDARD section. The second raise
+# followed a real-data check (_real_ndx_trades_per_day.py, real 2024
+# NDX100 1-min bars, not synthetic) run after fixing a bug that had made
+# bos_mode="raw_wick" fire zero trades ever (see generate_signals' raw_wick
+# branch comment) — once fixed, random param draws on real data hit a
+# median of ~1.5 trades/day and 34% of draws cleared >=3/day, confirming
+# the user's explicit "2-3 times a day" target is mechanically achievable,
+# not just a synthetic artifact. A 5-period walk-forward split of ~10
+# years of history gives each period roughly 500 trading days, so 100
+# trades/period is still a floor well below even a modest ~0.5-1/day
+# candidate — a statistical-validity minimum, not the target itself (the
+# score's avg_n term below is what actually rewards approaching 2-3/day).
+MIN_TRADES_TOTAL      = 500
+MIN_TRADES_PER_PERIOD = 100
 TOP_N                 = 100
 CHECKPOINT_EVERY      = 500
 CHECKPOINT_SECONDS    = 1800
@@ -320,11 +333,29 @@ def generate_signals(df: pd.DataFrame, p: dict) -> List[dict]:
     if bos_mode == "raw_wick":
         # Added 2026-08-25, per the user's own definition: a candle
         # closing beyond the WICK (raw high/low, no fractal filter) of a
-        # previous candle within the trailing bos_lookback_bars window IS
+        # PREVIOUS candle within the trailing bos_lookback_bars window IS
         # a break of structure — genuine 1-minute-scale structure, not a
         # K=3-bar-smoothed fractal. See module docstring.
-        recent_swing_high = high_s.rolling(bos_lookback, min_periods=1).max()
-        recent_swing_low = low_s.rolling(bos_lookback, min_periods=1).min()
+        #
+        # 2026-08-25 correctness fix: the window MUST exclude the current
+        # bar (shift(1) below) — the very first version of this branch
+        # rolled high_s/low_s INCLUDING the current bar, which made
+        # beyond_up = close_s > recent_swing_high structurally impossible
+        # on any real (internally-consistent) OHLC bar, since
+        # recent_swing_high >= high_s[t] >= close_s[t] always holds once
+        # the current bar's own high is in the window — i.e. raw_wick
+        # could NEVER fire. Confirmed empirically: 0/401 random draws
+        # produced a single raw_wick trade on real 2024 NDX100 data (see
+        # _real_ndx_trades_per_day.py), while the earlier "it works" read
+        # on synthetic data (selftest.py's build_synthetic) turned out to
+        # be an artifact of that generator's own bug — its `close` isn't
+        # clamped into [low, high], so close could exceed the bar's own
+        # high there, silently satisfying the broken comparison. Real
+        # bars can't do that. The fractal branch below never had this bug
+        # — swing_high_confirmed/swing_low_confirmed are already
+        # shift(K)'d in precompute.py, so they're inherently past-only.
+        recent_swing_high = high_s.shift(1).rolling(bos_lookback, min_periods=1).max()
+        recent_swing_low = low_s.shift(1).rolling(bos_lookback, min_periods=1).min()
     else:
         recent_swing_high = df["swing_high_confirmed"].rolling(bos_lookback, min_periods=1).max()
         recent_swing_low = df["swing_low_confirmed"].rolling(bos_lookback, min_periods=1).min()
@@ -568,11 +599,17 @@ def backtest_multiperiod(df: pd.DataFrame, p: dict) -> Optional[dict]:
     consistency = 1.0 / (1.0 + ret_std / (abs(avg_ret) + 1e-9))
     calmar = avg_ret / (ret_std + 1e-9)
     pf_component = 0.4 * min(avg_pf, 5.0) + 0.6 * min(min_pf, 5.0)
-    # avg_n divisor raised 15.0 -> 50.0 2026-08-25 (cap: 30/period ->
-    # 100/period) — the old cap gave the search zero extra reward for
-    # trade counts above 30/period, far below the "many trades a day"
-    # brief. See module docstring / MIN_TRADES_* comment above.
-    score = pf_component * (consistency ** 2) * min(avg_n / 50.0, 2.0) * max(calmar, 0)
+    # avg_n divisor: 15.0 -> 50.0 -> 600.0, all 2026-08-25 (cap: 30/period
+    # -> 100/period -> 1200/period). The first two raises were before any
+    # real-data measurement; this one follows the real 2024 NDX100 check
+    # (_real_ndx_trades_per_day.py) that confirmed 2-3 trades/day —
+    # roughly 1000-1500/period across a ~500-trading-day walk-forward
+    # period — is genuinely achievable, matching the user's explicit
+    # target. 1200/period (~2.4/day) sits inside that band: the search
+    # keeps getting rewarded for more trades all the way up to it instead
+    # of plateauing at a frequency far below the brief's intent. See
+    # module docstring / MIN_TRADES_* comment above.
+    score = pf_component * (consistency ** 2) * min(avg_n / 600.0, 2.0) * max(calmar, 0)
 
     wfe = None
     if len(valid) == N_PERIODS_SEARCH:

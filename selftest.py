@@ -41,11 +41,22 @@ def build_synthetic(n_days: int = 60, bars_per_day: int = 800, seed: int = 0) ->
             if np.random.rand() < 0.003:
                 shock += np.random.choice([-1, 1]) * np.random.uniform(30, 80)
             pull = (day_open - price) * 0.01   # deliberate mean-reversion bias, see module docstring
-            price = price + shock + pull
             o = price
-            h = price + abs(np.random.normal(0, 2.0))
-            l = price - abs(np.random.normal(0, 2.0))
-            c = price + np.random.normal(0, 1.0)
+            move = shock + pull
+            c = price + move
+            # 2026-08-25 fix: high/low must be derived from BOTH open and
+            # close (then widened by independent wick noise), not from
+            # open alone with close drawn separately afterward — the
+            # earlier version let close land outside [low, high], an
+            # internally-inconsistent OHLC bar no real market ever
+            # produces. That silently made bos_mode="raw_wick" look like
+            # it fired plausibly on this synthetic data when the real
+            # underlying comparison (close beyond a bar's own wick) is
+            # structurally impossible on genuine OHLC — see
+            # mean_reversion.py's raw_wick branch comment for the full
+            # story and the real-data check that caught it.
+            h = max(o, c) + abs(np.random.normal(0, 2.0))
+            l = min(o, c) - abs(np.random.normal(0, 2.0))
             price = c
             rows.append((o, h, l, c, 1000 + np.random.rand() * 100))
             idx.append(ts)
@@ -90,7 +101,8 @@ def main():
         raise SystemExit(f"{n_exc} trials raised — fix before running a real search.")
 
     print("Stage 2/4 — finding one candidate that clears the accept gate "
-          "(profitable in >=4/5 periods, >=100 trades)...")
+          f"(profitable in >=4/5 periods, >={mr.MIN_TRADES_TOTAL} trades total, "
+          f">={mr.MIN_TRADES_PER_PERIOD}/period)...")
     best = None
     for trial in range(500):
         p = mr.sample_params(["TESTIDX"])
