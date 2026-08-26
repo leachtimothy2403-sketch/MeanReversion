@@ -48,6 +48,15 @@ parameter — see mean_reversion.py's own docstring for what IS computed
 fresh per search iteration instead (the fair-value/consolidation logic,
 deviation threshold, BOS lookback/confirm window).
 
+2026-08-26: also precomputes `htf_swing_high_confirmed`/
+`htf_swing_low_confirmed` (K=3 fractal swings on 5-min bars, causally
+broadcast onto the 1-min index — see `_htf_swing_columns`) for
+mean_reversion.py's `require_htf_confirm` sweep. IMPORTANT: any asset
+precomputed before this date needs to be RE-RUN through this script
+before `require_htf_confirm=True` draws can be sampled for it —
+generate_signals raises a clear RuntimeError rather than crashing if
+those columns are missing.
+
 Usage:
     py -3 precompute.py <ASSET>
     py -3 precompute.py ALL
@@ -99,6 +108,15 @@ DIVISOR_BREAK_LOG_THRESHOLD = np.log(5)  # ratio outside [0.2, 5] — not a cred
 
 ATR_WINDOWS = [14, 30, 60, 120]   # minutes; swept via atr_window in mean_reversion.SPACE
 K = 3                              # fractal half-window
+
+# Multi-timeframe (HTF) confirmation — added 2026-08-26, see
+# mean_reversion.py's require_htf_confirm / htf_lookback_bars and
+# strategy_improvement_ideas_2026-08-26.md Section 5. A cheap 5-min
+# fractal-swing proxy (not RCTBE's HMM Compression label — that's the
+# heavier follow-up per the research doc's own recommendation to test a
+# cheaper mechanism first).
+HTF_RULE = "5min"
+HTF_K = 3
 
 
 def _harmonize_divisor_breaks(df: pd.DataFrame, plausible_range: tuple[float, float]) -> pd.DataFrame:
@@ -161,6 +179,28 @@ def _atr(df: pd.DataFrame, window: int) -> pd.Series:
     return tr.rolling(window).mean()
 
 
+def _htf_swing_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """5-minute confirmed swing high/low, broadcast back onto the 1-min
+    index — added 2026-08-26 for mean_reversion.py's require_htf_confirm.
+
+    Causal resampling: label="right", closed="left" means each 5-min bin
+    is labeled by its CLOSING-edge timestamp, so `reindex(..., ffill)`
+    below can never expose a still-forming 5-min bar to an earlier 1-min
+    timestamp — a 1-min bar only ever sees a 5-min swing value from a
+    5-min bar that had fully closed by that point in time. Same K=3
+    fractal-confirmation convention as the 1-min swing columns above
+    (shift(HTF_K) so only CONFIRMED fractals are exposed, never a
+    still-unconfirmable candidate)."""
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    df_htf = df.resample(HTF_RULE, label="right", closed="left").agg(agg).dropna(subset=["open"])
+    is_fh = df_htf["high"] == df_htf["high"].rolling(2 * HTF_K + 1, center=True).max()
+    is_fl = df_htf["low"] == df_htf["low"].rolling(2 * HTF_K + 1, center=True).min()
+    df_htf["htf_swing_high_confirmed"] = df_htf["high"].where(is_fh).shift(HTF_K)
+    df_htf["htf_swing_low_confirmed"] = df_htf["low"].where(is_fl).shift(HTF_K)
+    htf_cols = df_htf[["htf_swing_high_confirmed", "htf_swing_low_confirmed"]]
+    return htf_cols.reindex(df.index, method="ffill")
+
+
 def precompute_asset(asset: str) -> pd.DataFrame:
     duk_code = INDEX_ASSETS[asset]
     duk_dir = DUKASCOPY_CACHE_ROOT / duk_code
@@ -184,6 +224,8 @@ def precompute_asset(asset: str) -> pd.DataFrame:
     is_fractal_high = df["high"] == df["high"].rolling(2 * K + 1, center=True).max()
     df["swing_low_confirmed"] = df["low"].where(is_fractal_low).shift(K)
     df["swing_high_confirmed"] = df["high"].where(is_fractal_high).shift(K)
+
+    df = df.join(_htf_swing_columns(df))
 
     atr_cols = [f"atr_{w}" for w in ATR_WINDOWS]
     out = df.dropna(subset=atr_cols)

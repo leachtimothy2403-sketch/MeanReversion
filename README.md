@@ -75,6 +75,57 @@ search is rewarded for finding higher-frequency setups all the way up
 toward that real target, not stopping at a floor set before real
 frequency was ever measured.
 
+## Two entry modes, and multi-timeframe confirmation (added 2026-08-26)
+
+After 45,000+ search iterations/worker on real NDX100 data still found
+zero accept-gate candidates, overnight research
+(`strategy_improvement_ideas_2026-08-26.md`) empirically ruled out data/
+regime problems and found the likely cause instead: the BOS mechanism's
+edge is real but thin, and the frequency fix above (widened lookbacks,
+`raw_wick`) appears to have diluted it further rather than adding useful
+trades. Rather than keep loosening BOS, two new swept mechanisms were
+added alongside it — the search decides which (if either) actually holds
+up, nothing was removed or hard-swapped:
+
+- **`entry_mode: "range_fade"`** (new, alongside the original `"bos"` —
+  see `SPACE`) — adapted from RCTBE's `layer2_range_fade.py`, which
+  solved the identical too-few-trades problem there by trading **during**
+  an ongoing consolidation instead of only at its rare end/break. While
+  price is inside a consolidating range (this project's own
+  `consolidation_bars`/`consolidation_atr_mult` concept), a wick into a
+  `fade_zone_pct` band near either edge — without a CLOSE beyond it,
+  which would look like a genuine breakout instead of a rejection — fades
+  back across the range. **Stop-loss**: just past the edge being faded,
+  same `k_buf`/`k_floor`/`k_cap` ATR philosophy as `"bos"`. **Take-
+  profit**: `target_fraction` of the way across the range (0.5 =
+  midpoint). **Exit**: the usual wall-clock horizon, PLUS an emergency
+  exit the instant the range breaks (stops being "consolidating") mid-
+  trade — the trade's whole premise just failed, so it closes immediately
+  at that bar's close rather than riding to the normal horizon.
+  `deviation_threshold_atr`/`bos_mode`/`bos_lookback_bars`/
+  `bos_confirm_bars`/`extension_lookback_bars` only apply to `"bos"`;
+  `fade_zone_pct` only applies to `"range_fade"` — see `SPACE`'s inline
+  comments in `mean_reversion.py`.
+- **`require_htf_confirm`** (new, applies to both entry modes) — a cheap
+  multi-timeframe filter: blocks a new trade if a 5-minute structure
+  break happened the OPPOSING way within the trailing
+  `htf_lookback_bars` (1-min bars) — e.g. don't buy a 1-min dip-fade if
+  price just broke down on the 5-min chart. Uses a 5-min K=3 fractal
+  swing proxy (`precompute.py`'s `_htf_swing_columns`), not the full HMM
+  regime label RCTBE uses for its own regime-flip exits — the research
+  doc's own recommendation was to test a cheaper mechanism first and only
+  build the HMM out if the cheaper proxy shows promise.
+
+**IMPORTANT — precompute must be re-run.** `require_htf_confirm=True`
+needs `htf_swing_high_confirmed`/`htf_swing_low_confirmed` columns that
+did not exist before 2026-08-26. Any asset precomputed before this
+change needs `py -3 precompute.py <ASSET>` (or `ALL`) run again before
+that parameter can be sampled — `generate_signals` raises a clear
+`RuntimeError` (not a crash) if a `require_htf_confirm=True` draw hits
+data that's missing them, so an un-refreshed asset fails loud, not
+silent. `entry_mode="bos"` with `require_htf_confirm=False` needs no
+precompute change and behaves exactly as before.
+
 Default asset universe (`precompute.py`'s `INDEX_ASSETS`): NDX100,
 SPX500, US30, GER40, FRA40, UK100, JPN225.
 
@@ -162,7 +213,7 @@ See `VPS_DEPLOYMENT.md` for running this unattended on the VPS.
 
 | File | What it is |
 |---|---|
-| `precompute.py` | 1-min OHLCV + ATR + swing fractals + daily-open anchor, per asset. |
+| `precompute.py` | 1-min OHLCV + ATR + swing fractals + daily-open anchor + 5-min HTF swing fractals (2026-08-26), per asset. |
 | `mean_reversion.py` | The strategy + random-search engine — `SPACE`, `generate_signals`, `backtest_signals`, `backtest_multiperiod`, checkpointing, `main()`. |
 | `gate2_holdout.py` | Gate 2 — blind OOS holdout. |
 | `plateau_check.py` | Gate 3 — parameter-plateau robustness check. |

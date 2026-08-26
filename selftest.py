@@ -71,6 +71,7 @@ def build_synthetic(n_days: int = 60, bars_per_day: int = 800, seed: int = 0) ->
     is_fh = df["high"] == df["high"].rolling(2 * K + 1, center=True).max()
     df["swing_low_confirmed"] = df["low"].where(is_fl).shift(K)
     df["swing_high_confirmed"] = df["high"].where(is_fh).shift(K)
+    df = df.join(pre._htf_swing_columns(df))  # 2026-08-26 — require_htf_confirm needs these
     return df.dropna(subset=[f"atr_{w}" for w in pre.ATR_WINDOWS])
 
 

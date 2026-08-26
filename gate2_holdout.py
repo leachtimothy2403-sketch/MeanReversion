@@ -50,8 +50,8 @@ def gate2_check(row: dict, df) -> dict:
 
     is_sigs = mr.generate_signals(is_df, p)
     oos_sigs = mr.generate_signals(oos_df, p)
-    is_bt = mr.backtest_signals(is_sigs, is_df, cost=cost)
-    oos_bt = mr.backtest_signals(oos_sigs, oos_df, cost=cost)
+    is_bt = mr.backtest_signals(is_sigs, is_df, cost=cost, p=p)
+    oos_bt = mr.backtest_signals(oos_sigs, oos_df, cost=cost, p=p)
 
     if is_bt is None or oos_bt is None:
         return {"verdict": "INSUFFICIENT_DATA", "is_bt": is_bt, "oos_bt": oos_bt, "degradation": None}

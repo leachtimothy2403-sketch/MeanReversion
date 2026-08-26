@@ -108,6 +108,37 @@ Design (translates the user's brief into swept, backtestable rules):
     also shrinks the deviation-from-fair-value reading throughout an
     extension, compounding the same-bar timing issue fixed above.
 
+  2026-08-26 — second entry mechanism + multi-timeframe confirmation.
+  After 45,000+ iterations/worker still found zero accept-gate
+  candidates on real NDX100 data, overnight research
+  (strategy_improvement_ideas_2026-08-26.md) empirically ruled out data/
+  regime explanations and landed on: BOS's edge is real but thin, and the
+  2026-08-25 frequency fix likely diluted it further. Two new swept
+  mechanisms were added ALONGSIDE "bos" (not a replacement — the search
+  itself decides which holds up):
+    - `entry_mode="range_fade"` — adapted from RCTBE's layer2_range_
+      fade.py: trade DURING an ongoing consolidation (wick into a
+      `fade_zone_pct` band near a range edge, without closing beyond it)
+      instead of only at BOS's rare breakout event. SL just past the
+      faded edge (same k_buf/k_floor/k_cap philosophy as bos). TP =
+      target_fraction of the way across the range. Adds a THIRD exit
+      race condition (see _replay_trade's `regime_ok`): if the range
+      stops "consolidating" mid-trade, exit immediately at that bar's
+      close — the trade's premise just broke.
+    - `require_htf_confirm` — cheap 5-min K=3 fractal swing filter
+      (precompute.py's `_htf_swing_columns`, NOT the full HMM regime
+      label RCTBE uses — deferred per the research doc's own
+      recommendation to test a cheaper mechanism first): blocks a new
+      trade if the opposite-direction 5-min structure broke within the
+      trailing `htf_lookback_bars` (1-min bars). Applies to both entry
+      modes. Needs precompute.py re-run on any asset precomputed before
+      this date — generate_signals raises a clear RuntimeError, not a
+      silent no-op or crash, if those columns are missing.
+    - `bos_mode`/`bos_lookback_bars`/`bos_confirm_bars`/`extension_
+      lookback_bars`/`deviation_threshold_atr` only affect entry_mode=
+      "bos"; `fade_zone_pct` only affects entry_mode="range_fade" — see
+      SPACE's inline comments.
+
 VALIDATION STANDARD — matches the sister project's own bar, not a looser
 one built for this project specifically:
   - 5-period walk-forward split (N_PERIODS_SEARCH=5), accept gate
@@ -235,12 +266,16 @@ SPACE = {
     "atr_window":              ATR_WINDOWS,                       # feeds deviation threshold + stop distance
     "consolidation_bars":      [5, 8, 13, 20, 30, 45],             # fair-value update sensitivity (window)
     "consolidation_atr_mult":  [0.5, 0.75, 1.0, 1.25, 1.5],        # fair-value update sensitivity (tightness) — ceiling lowered from 2.0 2026-08-25, see docstring
-    "deviation_threshold_atr": [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0],# distance from fair value to start trading
-    "bos_mode":                ["fractal", "raw_wick"],            # added 2026-08-25 — see docstring's frequency-fix note
-    "bos_lookback_bars":       [1, 2, 3, 5, 8, 13, 20, 30, 45, 60],# widened down to 1-3 2026-08-25 for genuine 1-minute-scale structure
-    "bos_confirm_bars":        [1, 2, 3, 5],                      # signal to enter — how convincing the break must be
-    "extension_lookback_bars": [1, 3, 5, 10, 20],                  # added 2026-08-25 — deviation no longer required on the exact BOS bar, see docstring
-    "target_fraction":         [0.5, 0.75, 1.0, 1.25],             # TP: how far back toward fair value
+    "deviation_threshold_atr": [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0],# distance from fair value to start trading — BOS entry_mode only, see docstring
+    "entry_mode":              ["bos", "range_fade"],              # added 2026-08-26 — see docstring's entry-mode note
+    "bos_mode":                ["fractal", "raw_wick"],            # added 2026-08-25 — see docstring's frequency-fix note. entry_mode="bos" only.
+    "bos_lookback_bars":       [1, 2, 3, 5, 8, 13, 20, 30, 45, 60],# widened down to 1-3 2026-08-25 for genuine 1-minute-scale structure. entry_mode="bos" only.
+    "bos_confirm_bars":        [1, 2, 3, 5],                      # signal to enter — how convincing the break must be. entry_mode="bos" only.
+    "extension_lookback_bars": [1, 3, 5, 10, 20],                  # added 2026-08-25 — deviation no longer required on the exact BOS bar, see docstring. entry_mode="bos" only.
+    "fade_zone_pct":           [0.10, 0.15, 0.20, 0.25, 0.30, 0.40],# added 2026-08-26 — how close to the range edge counts as "faded". entry_mode="range_fade" only, see docstring.
+    "require_htf_confirm":     [False, True],                     # added 2026-08-26 — 5-min structure must not have just broken the opposite way. Needs precompute.py's htf_swing_*_confirmed columns.
+    "htf_lookback_bars":       [30, 60, 120, 240, 480],            # how far back (1-min bars) to check for an opposing 5-min break. require_htf_confirm=True only.
+    "target_fraction":         [0.5, 0.75, 1.0, 1.25],             # TP: how far back toward fair value (bos) / across the range (range_fade)
     "exit_horizon_bars":       [15, 30, 60, 90, 120, 180, 240, 360],
     "use_session_close":       [False, True],
     "k_buf":                   [0.1, 0.2, 0.3, 0.5],               # SL construction (structural + ATR buffer)
@@ -282,10 +317,14 @@ def load_asset(asset: str) -> Optional[pd.DataFrame]:
 #  SIGNAL GENERATION
 # ══════════════════════════════════════════════════════════════════════════
 
-def _fair_value_series(df: pd.DataFrame, atr: pd.Series, p: dict) -> pd.Series:
-    """Day-open anchor, updated at every confirmed consolidation event.
-    Fully causal and vectorized — one rolling pass + one ffill, no python
-    loop, despite fair value being logically path-dependent."""
+def _consolidation_range(df: pd.DataFrame, atr: pd.Series, p: dict):
+    """Rolling high/low over `consolidation_bars`, and whether that range
+    is CURRENTLY tight enough (<= consolidation_atr_mult * ATR) to count
+    as an active consolidation — extracted 2026-08-26 (was inline in
+    `_fair_value_series` only) so `_fair_value_series`, the new
+    entry_mode="range_fade" trigger, and range_fade's regime-break exit
+    all agree on exactly the same definition of "currently ranging"
+    instead of three independent, potentially-drifting copies."""
     consolidation_bars = p["consolidation_bars"]
     mult = p["consolidation_atr_mult"]
 
@@ -293,6 +332,15 @@ def _fair_value_series(df: pd.DataFrame, atr: pd.Series, p: dict) -> pd.Series:
     roll_low = df["low"].rolling(consolidation_bars).min()
     roll_range = roll_high - roll_low
     is_consolidating = (roll_range <= mult * atr) & atr.notna() & roll_range.notna()
+    return roll_high, roll_low, is_consolidating
+
+
+def _fair_value_series(df: pd.DataFrame, atr: pd.Series, p: dict,
+                        roll_high: pd.Series, roll_low: pd.Series,
+                        is_consolidating: pd.Series) -> pd.Series:
+    """Day-open anchor, updated at every confirmed consolidation event.
+    Fully causal and vectorized — one rolling pass + one ffill, no python
+    loop, despite fair value being logically path-dependent."""
     consolidating_rising = is_consolidating & ~is_consolidating.shift(1, fill_value=False)
     consolidation_level = (roll_high + roll_low) / 2.0
 
@@ -306,76 +354,127 @@ def _fair_value_series(df: pd.DataFrame, atr: pd.Series, p: dict) -> pd.Series:
 
 def generate_signals(df: pd.DataFrame, p: dict) -> List[dict]:
     atr = df[f"atr_{p['atr_window']}"]
-    fair_value = _fair_value_series(df, atr, p)
+    roll_high, roll_low, is_consolidating = _consolidation_range(df, atr, p)
+    fair_value = _fair_value_series(df, atr, p, roll_high, roll_low, is_consolidating)
 
     close_s = df["close"]
     high_s = df["high"]
     low_s = df["low"]
 
-    deviation_atr = (close_s - fair_value) / atr
-    threshold = p["deviation_threshold_atr"]
-    extended_below = deviation_atr <= -threshold   # too cheap -> looking to BUY back toward fair value
-    extended_above = deviation_atr >= threshold     # too rich -> looking to SELL back toward fair value
+    entry_mode = p.get("entry_mode", "bos")
 
-    # Extension no longer has to land on the exact same bar as the BOS
-    # confirmation (added 2026-08-25 — see module docstring's frequency-
-    # fix note): true if extended at ANY point in the trailing
-    # extension_lookback_bars window, inclusive of the current bar.
-    ext_lookback = p.get("extension_lookback_bars", 1)
-    extended_below_recent = extended_below.rolling(ext_lookback, min_periods=1).max().astype(bool)
-    extended_above_recent = extended_above.rolling(ext_lookback, min_periods=1).max().astype(bool)
+    if p.get("require_htf_confirm"):
+        if "htf_swing_high_confirmed" not in df.columns or "htf_swing_low_confirmed" not in df.columns:
+            raise RuntimeError(
+                "require_htf_confirm=True but this asset's precomputed data "
+                "is missing htf_swing_high_confirmed/htf_swing_low_confirmed "
+                "— re-run precompute.py (added 2026-08-26, see "
+                "_htf_swing_columns in precompute.py's docstring) before "
+                "sampling this parameter."
+            )
 
-    # --- break of structure ---
-    bos_lookback = p["bos_lookback_bars"]
-    confirm_bars = p["bos_confirm_bars"]
-    bos_mode = p.get("bos_mode", "fractal")
+    if entry_mode == "range_fade":
+        # Added 2026-08-26 — see strategy_improvement_ideas_2026-08-26.md
+        # Section 3 / RCTBE's layer2_range_fade.py. Trades DURING an
+        # ongoing consolidation instead of only at BOS (a rare event by
+        # definition): price wicks into a `fade_zone_pct` band near
+        # either edge of the CURRENT rolling consolidation range without
+        # CLOSING beyond it (a close beyond the edge looks like a real
+        # breakout in progress, not a rejection worth fading), and we
+        # fade back toward the opposite side of the range.
+        fade_pct = p["fade_zone_pct"]
+        range_size = roll_high - roll_low
+        upper_zone_thresh = roll_high - fade_pct * range_size
+        lower_zone_thresh = roll_low + fade_pct * range_size
+        has_range = range_size > 0
 
-    if bos_mode == "raw_wick":
-        # Added 2026-08-25, per the user's own definition: a candle
-        # closing beyond the WICK (raw high/low, no fractal filter) of a
-        # PREVIOUS candle within the trailing bos_lookback_bars window IS
-        # a break of structure — genuine 1-minute-scale structure, not a
-        # K=3-bar-smoothed fractal. See module docstring.
-        #
-        # 2026-08-25 correctness fix: the window MUST exclude the current
-        # bar (shift(1) below) — the very first version of this branch
-        # rolled high_s/low_s INCLUDING the current bar, which made
-        # beyond_up = close_s > recent_swing_high structurally impossible
-        # on any real (internally-consistent) OHLC bar, since
-        # recent_swing_high >= high_s[t] >= close_s[t] always holds once
-        # the current bar's own high is in the window — i.e. raw_wick
-        # could NEVER fire. Confirmed empirically: 0/401 random draws
-        # produced a single raw_wick trade on real 2024 NDX100 data (see
-        # _real_ndx_trades_per_day.py), while the earlier "it works" read
-        # on synthetic data (selftest.py's build_synthetic) turned out to
-        # be an artifact of that generator's own bug — its `close` isn't
-        # clamped into [low, high], so close could exceed the bar's own
-        # high there, silently satisfying the broken comparison. Real
-        # bars can't do that. The fractal branch below never had this bug
-        # — swing_high_confirmed/swing_low_confirmed are already
-        # shift(K)'d in precompute.py, so they're inherently past-only.
-        recent_swing_high = high_s.shift(1).rolling(bos_lookback, min_periods=1).max()
-        recent_swing_low = low_s.shift(1).rolling(bos_lookback, min_periods=1).min()
+        in_upper_zone = is_consolidating & has_range & (high_s >= upper_zone_thresh) & (close_s < roll_high)
+        in_lower_zone = is_consolidating & has_range & (low_s <= lower_zone_thresh) & (close_s > roll_low)
+
+        # Rising-edge only — fires once per approach into the zone, not
+        # every bar spent still inside it.
+        sell_cand = (in_upper_zone & ~in_upper_zone.shift(1, fill_value=False)).to_numpy()
+        buy_cand = (in_lower_zone & ~in_lower_zone.shift(1, fill_value=False)).to_numpy()
     else:
-        recent_swing_high = df["swing_high_confirmed"].rolling(bos_lookback, min_periods=1).max()
-        recent_swing_low = df["swing_low_confirmed"].rolling(bos_lookback, min_periods=1).min()
+        deviation_atr = (close_s - fair_value) / atr
+        threshold = p["deviation_threshold_atr"]
+        extended_below = deviation_atr <= -threshold   # too cheap -> looking to BUY back toward fair value
+        extended_above = deviation_atr >= threshold     # too rich -> looking to SELL back toward fair value
 
-    beyond_up = close_s > recent_swing_high
-    beyond_down = close_s < recent_swing_low
-    beyond_up_confirmed = beyond_up.rolling(confirm_bars).sum() >= confirm_bars
-    beyond_down_confirmed = beyond_down.rolling(confirm_bars).sum() >= confirm_bars
+        # Extension no longer has to land on the exact same bar as the BOS
+        # confirmation (added 2026-08-25 — see module docstring's frequency-
+        # fix note): true if extended at ANY point in the trailing
+        # extension_lookback_bars window, inclusive of the current bar.
+        ext_lookback = p.get("extension_lookback_bars", 1)
+        extended_below_recent = extended_below.rolling(ext_lookback, min_periods=1).max().astype(bool)
+        extended_above_recent = extended_above.rolling(ext_lookback, min_periods=1).max().astype(bool)
 
-    bos_up = (beyond_up_confirmed & ~beyond_up_confirmed.shift(1, fill_value=False)).to_numpy()
-    bos_down = (beyond_down_confirmed & ~beyond_down_confirmed.shift(1, fill_value=False)).to_numpy()
+        # --- break of structure ---
+        bos_lookback = p["bos_lookback_bars"]
+        confirm_bars = p["bos_confirm_bars"]
+        bos_mode = p.get("bos_mode", "fractal")
 
-    buy_cand = bos_up & extended_below_recent.to_numpy()
-    sell_cand = bos_down & extended_above_recent.to_numpy()
+        if bos_mode == "raw_wick":
+            # Added 2026-08-25, per the user's own definition: a candle
+            # closing beyond the WICK (raw high/low, no fractal filter) of a
+            # PREVIOUS candle within the trailing bos_lookback_bars window IS
+            # a break of structure — genuine 1-minute-scale structure, not a
+            # K=3-bar-smoothed fractal. See module docstring.
+            #
+            # 2026-08-25 correctness fix: the window MUST exclude the current
+            # bar (shift(1) below) — the very first version of this branch
+            # rolled high_s/low_s INCLUDING the current bar, which made
+            # beyond_up = close_s > recent_swing_high structurally impossible
+            # on any real (internally-consistent) OHLC bar, since
+            # recent_swing_high >= high_s[t] >= close_s[t] always holds once
+            # the current bar's own high is in the window — i.e. raw_wick
+            # could NEVER fire. Confirmed empirically: 0/401 random draws
+            # produced a single raw_wick trade on real 2024 NDX100 data (see
+            # _real_ndx_trades_per_day.py), while the earlier "it works" read
+            # on synthetic data (selftest.py's build_synthetic) turned out to
+            # be an artifact of that generator's own bug — its `close` isn't
+            # clamped into [low, high], so close could exceed the bar's own
+            # high there, silently satisfying the broken comparison. Real
+            # bars can't do that. The fractal branch below never had this bug
+            # — swing_high_confirmed/swing_low_confirmed are already
+            # shift(K)'d in precompute.py, so they're inherently past-only.
+            recent_swing_high = high_s.shift(1).rolling(bos_lookback, min_periods=1).max()
+            recent_swing_low = low_s.shift(1).rolling(bos_lookback, min_periods=1).min()
+        else:
+            recent_swing_high = df["swing_high_confirmed"].rolling(bos_lookback, min_periods=1).max()
+            recent_swing_low = df["swing_low_confirmed"].rolling(bos_lookback, min_periods=1).min()
+
+        beyond_up = close_s > recent_swing_high
+        beyond_down = close_s < recent_swing_low
+        beyond_up_confirmed = beyond_up.rolling(confirm_bars).sum() >= confirm_bars
+        beyond_down_confirmed = beyond_down.rolling(confirm_bars).sum() >= confirm_bars
+
+        bos_up = (beyond_up_confirmed & ~beyond_up_confirmed.shift(1, fill_value=False)).to_numpy()
+        bos_down = (beyond_down_confirmed & ~beyond_down_confirmed.shift(1, fill_value=False)).to_numpy()
+
+        buy_cand = bos_up & extended_below_recent.to_numpy()
+        sell_cand = bos_down & extended_above_recent.to_numpy()
 
     direction = p["direction"]
     if direction == "Buy":
         sell_cand = np.zeros_like(sell_cand)
     elif direction == "Sell":
         buy_cand = np.zeros_like(buy_cand)
+
+    if p.get("require_htf_confirm"):
+        # Cheap multi-timeframe confirmation (added 2026-08-26, see
+        # strategy_improvement_ideas_2026-08-26.md Section 5): don't fade
+        # against a higher-timeframe structure break that just happened
+        # the OPPOSING way — a bearish 5-min break in the last
+        # `htf_lookback_bars` (1-min bars) blocks new buys, a bullish one
+        # blocks new sells. Applies to both entry_mode values.
+        htf_lookback = p.get("htf_lookback_bars", 60)
+        htf_swing_high = df["htf_swing_high_confirmed"]
+        htf_swing_low = df["htf_swing_low_confirmed"]
+        recent_htf_break_down = (close_s < htf_swing_low).rolling(htf_lookback, min_periods=1).max().astype(bool).to_numpy()
+        recent_htf_break_up = (close_s > htf_swing_high).rolling(htf_lookback, min_periods=1).max().astype(bool).to_numpy()
+        buy_cand = buy_cand & ~recent_htf_break_down
+        sell_cand = sell_cand & ~recent_htf_break_up
 
     candidate = buy_cand | sell_cand
 
@@ -401,23 +500,41 @@ def generate_signals(df: pd.DataFrame, p: dict) -> List[dict]:
     entry_arr = close_s.to_numpy()[cand_idx]
     fv_arr = fair_value.to_numpy()[cand_idx]
 
-    recent_low_raw = low_s.rolling(bos_lookback, min_periods=1).min().to_numpy()[cand_idx]
-    recent_high_raw = high_s.rolling(bos_lookback, min_periods=1).max().to_numpy()[cand_idx]
-    sl_anchor_arr = np.where(is_buy_arr, recent_low_raw, recent_high_raw)
+    target_fraction = p["target_fraction"]
+
+    if entry_mode == "range_fade":
+        # SL: structural, just past the range edge being faded (same
+        # ATR-buffered-floor-and-cap philosophy as the bos branch below).
+        # TP: swept fraction across the range (0.5 = midpoint), from the
+        # NEAR edge toward the FAR edge — matches target_fraction's
+        # existing convention (1.0 = the far edge itself).
+        range_low_arr = roll_low.to_numpy()[cand_idx]
+        range_high_arr = roll_high.to_numpy()[cand_idx]
+        range_size_arr = range_high_arr - range_low_arr
+        sl_anchor_arr = np.where(is_buy_arr, range_low_arr, range_high_arr)
+        tp_arr = np.where(
+            is_buy_arr,
+            range_low_arr + target_fraction * range_size_arr,
+            range_high_arr - target_fraction * range_size_arr,
+        )
+    else:
+        bos_lookback = p["bos_lookback_bars"]
+        recent_low_raw = low_s.rolling(bos_lookback, min_periods=1).min().to_numpy()[cand_idx]
+        recent_high_raw = high_s.rolling(bos_lookback, min_periods=1).max().to_numpy()[cand_idx]
+        sl_anchor_arr = np.where(is_buy_arr, recent_low_raw, recent_high_raw)
+        tp_arr = np.where(
+            is_buy_arr,
+            entry_arr + target_fraction * (fv_arr - entry_arr),
+            entry_arr - target_fraction * (entry_arr - fv_arr),
+        )
+
+    valid_tp = np.where(is_buy_arr, tp_arr > entry_arr, tp_arr < entry_arr)
 
     k_buf, k_cap, k_floor = p["k_buf"], p["k_cap"], p["k_floor"]
     sl_structural_arr = np.where(is_buy_arr, sl_anchor_arr - k_buf * a_arr, sl_anchor_arr + k_buf * a_arr)
     raw_dist_arr = np.abs(entry_arr - sl_structural_arr)
     dist_arr = np.clip(raw_dist_arr, k_floor * a_arr, k_cap * a_arr)
     sl_arr = np.where(is_buy_arr, entry_arr - dist_arr, entry_arr + dist_arr)
-
-    target_fraction = p["target_fraction"]
-    tp_arr = np.where(
-        is_buy_arr,
-        entry_arr + target_fraction * (fv_arr - entry_arr),
-        entry_arr - target_fraction * (entry_arr - fv_arr),
-    )
-    valid_tp = np.where(is_buy_arr, tp_arr > entry_arr, tp_arr < entry_arr)
 
     horizon_ts_arr = idx[cand_idx] + pd.Timedelta(minutes=1) * p["exit_horizon_bars"]
     exit_idx_arr = idx.searchsorted(horizon_ts_arr, side="left")
@@ -450,9 +567,23 @@ def generate_signals(df: pd.DataFrame, p: dict) -> List[dict]:
 #  BACKTEST
 # ══════════════════════════════════════════════════════════════════════════
 
-def _replay_trade(sig: dict, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, n: int):
+def _replay_trade(sig: dict, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, n: int,
+                   regime_ok: Optional[np.ndarray] = None):
     """Shared SL/TP-race replay logic for one signal. Returns (r_multiple,
-    is_timeout) or None if the signal has no room to run."""
+    is_timeout) or None if the signal has no room to run.
+
+    `regime_ok` (added 2026-08-26, entry_mode="range_fade" only): an
+    optional per-bar boolean array, same length/alignment as
+    highs/lows/closes, True while the market is still "consolidating"
+    (see _consolidation_range) — i.e. the premise the range-fade trade was
+    entered on still holds. When provided, adds a THIRD race condition: if
+    the range breaks (regime_ok goes False) while the trade is open, exit
+    immediately at that bar's CLOSE rather than riding to the normal
+    horizon. Priority on same-bar ties: SL > break > TP (SL stays most
+    conservative; a break is treated as more urgent than a plain target
+    hit since the trade's whole premise just failed). When regime_ok is
+    None (the default, and always the case for entry_mode="bos"), this
+    reduces EXACTLY to the original 2-way SL/TP race below."""
     ei, e, sl, tp, risk, d = sig["bar_idx"], sig["entry"], sig["sl"], sig["tp"], sig["risk"], sig["direction"]
     end = min(sig["exit_idx"], n)
     if end <= ei + 1:
@@ -464,21 +595,36 @@ def _replay_trade(sig: dict, highs: np.ndarray, lows: np.ndarray, closes: np.nda
     else:
         sl_mask = h_win >= sl
         tp_mask = l_win <= tp
+
+    if regime_ok is not None:
+        break_mask = ~regime_ok[ei + 1:end]
+        has_break = break_mask.any()
+    else:
+        break_mask = None
+        has_break = False
+
     has_sl, has_tp = sl_mask.any(), tp_mask.any()
-    if not has_sl and not has_tp:
+    if not has_sl and not has_tp and not has_break:
         ep = closes[min(end - 1, n - 1)]
         r = (ep - e) / risk if d == "Buy" else (e - ep) / risk
         return r, True
+
     sl_i = int(np.argmax(sl_mask)) if has_sl else n + 1
     tp_i = int(np.argmax(tp_mask)) if has_tp else n + 1
-    if sl_i <= tp_i:   # ties go to SL — conservative
+    break_i = int(np.argmax(break_mask)) if has_break else n + 1
+
+    if sl_i <= tp_i and sl_i <= break_i:      # SL wins ties — conservative
         r = -1.0
+    elif break_i <= tp_i:                     # break wins over a same/later TP
+        ep = closes[ei + 1:end][break_i]
+        r = (ep - e) / risk if d == "Buy" else (e - ep) / risk
     else:
         r = (tp - e) / risk if d == "Buy" else (e - tp) / risk
     return r, False
 
 
-def backtest_signals(signals: List[dict], df: pd.DataFrame, cost: float = 0.0) -> Optional[dict]:
+def backtest_signals(signals: List[dict], df: pd.DataFrame, cost: float = 0.0,
+                      p: Optional[dict] = None) -> Optional[dict]:
     if len(signals) < MIN_TRADES_PER_PERIOD:
         return None
 
@@ -487,11 +633,17 @@ def backtest_signals(signals: List[dict], df: pd.DataFrame, cost: float = 0.0) -
     closes = df["close"].to_numpy()
     n = len(closes)
 
+    regime_ok = None
+    if p is not None and p.get("entry_mode") == "range_fade":
+        atr = df[f"atr_{p['atr_window']}"]
+        _, _, is_consolidating = _consolidation_range(df, atr, p)
+        regime_ok = is_consolidating.to_numpy()
+
     r_results: List[float] = []
     n_timeout = 0
 
     for sig in signals:
-        out = _replay_trade(sig, highs, lows, closes, n)
+        out = _replay_trade(sig, highs, lows, closes, n, regime_ok=regime_ok)
         if out is None:
             continue
         pnl_r, is_timeout = out
@@ -543,9 +695,15 @@ def get_trade_records(df: pd.DataFrame, p: dict, cost: float = 0.0) -> List[dict
     idx = df.index
     n = len(closes)
 
+    regime_ok = None
+    if p.get("entry_mode") == "range_fade":
+        atr = df[f"atr_{p['atr_window']}"]
+        _, _, is_consolidating = _consolidation_range(df, atr, p)
+        regime_ok = is_consolidating.to_numpy()
+
     records = []
     for sig in sigs:
-        out = _replay_trade(sig, highs, lows, closes, n)
+        out = _replay_trade(sig, highs, lows, closes, n, regime_ok=regime_ok)
         if out is None:
             continue
         r, _ = out
@@ -569,7 +727,7 @@ def backtest_multiperiod(df: pd.DataFrame, p: dict) -> Optional[dict]:
             results.append(None)
             continue
         sigs = generate_signals(period_df, p)
-        r = backtest_signals(sigs, period_df, cost=cost)
+        r = backtest_signals(sigs, period_df, cost=cost, p=p)
         results.append(r)
 
     valid = [r for r in results if r is not None]

@@ -26,15 +26,23 @@ import json
 
 import mean_reversion as mr
 
-# "direction" and "bos_mode" excluded (categorical — flipping either
-# tests a different economic hypothesis, not neighborhood robustness of
-# this one; the search sweeping them already answers "does the other
-# mode/side also work"). "extension_lookback_bars" added 2026-08-25
-# alongside bos_mode/raw_wick — see mean_reversion.py's docstring.
+# "direction", "bos_mode", "entry_mode", and "require_htf_confirm"
+# excluded (categorical — flipping any of these tests a different
+# economic hypothesis, not neighborhood robustness of this one; the
+# search sweeping them already answers "does the other mode/side also
+# work"). "extension_lookback_bars" added 2026-08-25 alongside bos_mode/
+# raw_wick; "fade_zone_pct" and "htf_lookback_bars" added 2026-08-26
+# alongside entry_mode="range_fade" and require_htf_confirm — see
+# mean_reversion.py's docstring. Note bos_lookback_bars/bos_confirm_bars/
+# extension_lookback_bars/deviation_threshold_atr only affect entry_mode
+# ="bos" candidates and fade_zone_pct only affects "range_fade" ones —
+# nudging the inactive mode's params on a given candidate is a harmless
+# no-op neighbor (same behavior, same result), not a bug.
 PERTURBABLE = [
     "atr_window", "consolidation_bars", "consolidation_atr_mult",
     "deviation_threshold_atr", "bos_lookback_bars", "bos_confirm_bars",
-    "extension_lookback_bars", "target_fraction", "exit_horizon_bars",
+    "extension_lookback_bars", "fade_zone_pct", "htf_lookback_bars",
+    "target_fraction", "exit_horizon_bars",
     "k_buf", "k_cap", "k_floor", "session_start_h", "session_window_h",
 ]
 
