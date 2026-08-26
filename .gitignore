@@ -22,9 +22,11 @@ data/
 # video_strategy_backtest.py's own sweep run log + raw per-draw CSV —
 # regenerable by re-running the sweep. video_strategy_top_candidates.json
 # IS worth versioning (same "small result worth preserving" convention as
-# top_strategies.json above), so it's deliberately NOT listed here.
-sweep_log.txt
-video_strategy_sweep_results.csv
+# top_strategies.json above), so it's deliberately NOT listed here. Glob
+# (not an exact name) since ad-hoc runs get suffixed, e.g. sweep_log_3yr.txt
+# for the 2022/2024/2026 version.
+sweep_log*.txt
+video_strategy_sweep_results*.csv
 
 # Python
 __pycache__/

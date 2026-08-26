@@ -252,8 +252,10 @@ def main():
     df_all = pd.read_parquet("mr_precomputed_NDX100.parquet")
     df_2022 = df_all[df_all.index.year == 2022]
     df_2024 = df_all[df_all.index.year == 2024]
+    df_2026 = df_all[df_all.index.year == 2026]   # YTD through 2026-08-24, added per Tim's request
     print(f"  2022: {len(df_2022):,} bars ({df_2022.index[0]} .. {df_2022.index[-1]})")
     print(f"  2024: {len(df_2024):,} bars ({df_2024.index[0]} .. {df_2024.index[-1]})")
+    print(f"  2026 (YTD): {len(df_2026):,} bars ({df_2026.index[0]} .. {df_2026.index[-1]})")
 
     # ── Phase 1: baseline (literal transcript reproduction) ──
     print("\n" + "=" * 78)
@@ -262,8 +264,10 @@ def main():
     print("=" * 78)
     r22 = eval_year(df_2022, BASELINE_PARAMS)
     r24 = eval_year(df_2024, BASELINE_PARAMS)
+    r26 = eval_year(df_2026, BASELINE_PARAMS)
     print(fmt_result("2022 (bear)", r22))
     print(fmt_result("2024 (bull)", r24))
+    print(fmt_result("2026 (YTD)", r26))
 
     # Quick sensitivity on static_risk_pct alone, RR fixed at the
     # transcript's 1.5, everything else held at baseline — shows how
@@ -273,16 +277,19 @@ def main():
         p = {**BASELINE_PARAMS, "static_risk_pct": rp}
         a = eval_year(df_2022, p)
         b = eval_year(df_2024, p)
+        c = eval_year(df_2026, p)
         pf_a = a["profit_factor"] if a else float("nan")
         pf_b = b["profit_factor"] if b else float("nan")
+        pf_c = c["profit_factor"] if c else float("nan")
         n_a = a["n_trades"] if a else 0
         n_b = b["n_trades"] if b else 0
-        print(f"  risk_pct={rp:.4f}  2022: PF={pf_a:.3f} n={n_a:<5}  2024: PF={pf_b:.3f} n={n_b:<5}")
+        n_c = c["n_trades"] if c else 0
+        print(f"  risk_pct={rp:.4f}  2022: PF={pf_a:.3f} n={n_a:<5}  2024: PF={pf_b:.3f} n={n_b:<5}  2026: PF={pf_c:.3f} n={n_c:<5}")
 
     # ── Phase 2: parameter sweep ──
     N_ITER = int(os.environ.get("SWEEP_ITER", 4000))
     print("\n" + "=" * 78)
-    print(f"PHASE 2 — SWEEP ({N_ITER:,} random draws, both years must be evaluated)")
+    print(f"PHASE 2 — SWEEP ({N_ITER:,} random draws, all three years must be evaluated)")
     print("=" * 78)
 
     rows = []
@@ -292,18 +299,23 @@ def main():
         p = sample_params()
         r22 = eval_year(df_2022, p)
         r24 = eval_year(df_2024, p)
-        if r22 is None or r24 is None:
+        r26 = eval_year(df_2026, p)
+        if r22 is None or r24 is None or r26 is None:
             continue
         row = {**p,
                "n_2022": r22["n_trades"], "pf_2022": r22["profit_factor"],
                "exp_2022": r22["expectancy_r"], "dd_2022": r22["max_dd_r"],
                "n_2024": r24["n_trades"], "pf_2024": r24["profit_factor"],
-               "exp_2024": r24["expectancy_r"], "dd_2024": r24["max_dd_r"]}
+               "exp_2024": r24["expectancy_r"], "dd_2024": r24["max_dd_r"],
+               "n_2026": r26["n_trades"], "pf_2026": r26["profit_factor"],
+               "exp_2026": r26["expectancy_r"], "dd_2026": r26["max_dd_r"]}
         rows.append(row)
         if (r22["n_trades"] >= MIN_TRADES_PER_YEAR and r24["n_trades"] >= MIN_TRADES_PER_YEAR
-                and r22["profit_factor"] > 1.0 and r24["profit_factor"] > 1.0):
-            row["avg_pf"] = (r22["profit_factor"] + r24["profit_factor"]) / 2
-            row["min_pf"] = min(r22["profit_factor"], r24["profit_factor"])
+                and r26["n_trades"] >= MIN_TRADES_PER_YEAR
+                and r22["profit_factor"] > 1.0 and r24["profit_factor"] > 1.0
+                and r26["profit_factor"] > 1.0):
+            row["avg_pf"] = (r22["profit_factor"] + r24["profit_factor"] + r26["profit_factor"]) / 3
+            row["min_pf"] = min(r22["profit_factor"], r24["profit_factor"], r26["profit_factor"])
             accepted.append(row)
         if i % 500 == 0:
             elapsed = time.time() - t0
@@ -313,18 +325,19 @@ def main():
 
     pd.DataFrame(rows).to_csv("video_strategy_sweep_results.csv", index=False)
     print(f"\nSweep done: {len(rows)} evaluable draws, {len(accepted)} accepted "
-          f"(PF>1.0 AND >={MIN_TRADES_PER_YEAR} trades in BOTH years).")
+          f"(PF>1.0 AND >={MIN_TRADES_PER_YEAR} trades in ALL THREE years — 2022, 2024, 2026 YTD).")
 
     accepted.sort(key=lambda r: r["min_pf"], reverse=True)
     top = accepted[:20]
     with open("video_strategy_top_candidates.json", "w") as f:
         json.dump(top, f, indent=2, default=str)
 
-    print("\nTop candidates (by min(PF_2022, PF_2024), i.e. worst-year-first):")
+    print("\nTop candidates (by min(PF_2022, PF_2024, PF_2026), i.e. worst-year-first):")
     for r in top[:10]:
         print(f"  min_pf={r['min_pf']:.3f}  avg_pf={r['avg_pf']:.3f}  "
               f"2022: PF={r['pf_2022']:.3f} n={r['n_2022']} exp={r['exp_2022']:+.4f}  "
               f"2024: PF={r['pf_2024']:.3f} n={r['n_2024']} exp={r['exp_2024']:+.4f}  "
+              f"2026: PF={r['pf_2026']:.3f} n={r['n_2026']} exp={r['exp_2026']:+.4f}  "
               f"risk_pct={r['static_risk_pct']} rr={r['rr']} bos_mode={r['bos_mode']} "
               f"dev_thr={r['deviation_threshold_atr']} dir={r['direction']}")
 
