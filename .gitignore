@@ -14,6 +14,18 @@ meanreversion_output*/DONE
 meanreversion_output*/results.csv
 meanreversion_output_stale_*/
 
+# Raw/consolidated market data staged for ad-hoc diagnostics (e.g. via the
+# device bridge) — large, regenerable from the Dukascopy cache, same
+# reasoning as mr_precomputed_*.parquet above.
+data/
+
+# video_strategy_backtest.py's own sweep run log + raw per-draw CSV —
+# regenerable by re-running the sweep. video_strategy_top_candidates.json
+# IS worth versioning (same "small result worth preserving" convention as
+# top_strategies.json above), so it's deliberately NOT listed here.
+sweep_log.txt
+video_strategy_sweep_results.csv
+
 # Python
 __pycache__/
 *.pyc

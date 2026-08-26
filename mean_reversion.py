@@ -136,8 +136,73 @@ Design (translates the user's brief into swept, backtestable rules):
       silent no-op or crash, if those columns are missing.
     - `bos_mode`/`bos_lookback_bars`/`bos_confirm_bars`/`extension_
       lookback_bars`/`deviation_threshold_atr` only affect entry_mode=
-      "bos"; `fade_zone_pct` only affects entry_mode="range_fade" — see
-      SPACE's inline comments.
+      "bos" (and, added later the same day, "static_risk" — they share
+      the same candidate generation); `fade_zone_pct` only affects
+      entry_mode="range_fade" — see SPACE's inline comments.
+
+  2026-08-26 (same day, follow-up) — range_fade risk/reward bug found
+  and fixed, plus an honest negative result on real data. After 50,000+
+  iterations/worker found zero candidates under EITHER entry_mode, a
+  real-data diagnostic (replaying backtest_multiperiod's exact logic
+  against staged 2024 NDX100 1-min data, not committed — ad hoc) found
+  the range_fade branch had a genuine construction bug: k_floor/k_cap
+  clamped the stop distance as an ATR multiple (correct for "bos", whose
+  stop anchors to a much larger breakout-move extent) but range_fade's
+  raw structural distance is inherently tiny (entry is intentionally
+  INSIDE a tight, ATR-capped range), so the ATR floor almost always
+  overrode it — decoupling the stop from the range while the target
+  stayed capped by that same small range. Measured impact: 82% of
+  signals had reward/risk < 1.0 (median 0.49) — a full TP win paid back
+  about HALF of what a full SL loss cost, tanking the profit factor
+  independent of whether the entry itself had any real edge. FIXED by
+  clamping to `range_size` instead of ATR (see the range_fade branch of
+  generate_signals below) — the same quantity target_fraction's target
+  already scales to, so risk and reward now share a natural unit and
+  the search can actually find target_fraction/k_floor combos with a
+  sane ratio (empirically: reward/risk correlates with target_fraction/
+  k_floor at r=0.73 after the fix).
+
+  That fix alone did NOT produce a working strategy, though — a larger
+  post-fix diagnostic (2,000 draws each against BOTH 2022 and 2024 real
+  NDX100 data) still found ZERO draws clearing the accept gate, and the
+  single best "enough trade volume" draw in each year still averaged
+  avg_profit_factor 0.77 (2022) / 0.62 (2024) — meaningfully
+  unprofitable in both a bear and a bull year, not just an artifact of
+  one regime. This matches the research doc's own concern: the cheap
+  "tight rolling range relative to ATR" proxy used for is_consolidating
+  can't distinguish a genuine range from a brief pause inside a trend,
+  and fading the latter loses. range_fade is left in SPACE (nothing
+  reverted — the risk/reward fix is real and correct regardless, and
+  the search sweeping it costs nothing but some iterations), but it
+  should NOT be expected to surface a real candidate as currently
+  designed; the natural next step, if this is worth pursuing further,
+  is the full walk-forward HMM Compression label (see Section 4 of
+  strategy_improvement_ideas_2026-08-26.md) rather than more search
+  iterations against the crude proxy.
+
+  2026-08-26 (third same-day update) — `entry_mode="static_risk"`, per a
+  prop-firm trading transcript Tim provided describing this project's
+  own original strategy brief. Same candidate generation as "bos"
+  (identical fair-value/consolidation engine, identical BOS
+  confirmation — see the shared branch above), but SL/TP construction
+  is NOT structural/ATR-clamped at all: one fixed % of entry price
+  (`static_risk_pct`), identical on every single trade, no swing/ATR
+  anchoring, no k_buf/k_floor/k_cap involved whatsoever. Take-profit is
+  a fixed risk:reward multiple (`rr`) of that same distance. This is a
+  literal reading of the transcript's own explicit departure from
+  structural sizing: "position sizing should not be a feeling ... every
+  single one should be static ... you tie it to the evaluation math" —
+  its own example being a $2,000-max-loss / $3,000-target eval, i.e. a
+  1:1.5 R:R. A standalone script (`video_strategy_backtest.py`, same
+  session) ran a baseline reproduction of the transcript's literal
+  numbers plus a parameter sweep against real 2022/2024 NDX100 1-min
+  data before this was folded into the actual search space here — see
+  claude/mean-reversion-strategy-status.md in the Claude Project for
+  those findings. Folded into SPACE (not left as a one-off script) so
+  it gets the same full walk-forward search, checkpointing, and VPS
+  parallelism (start_search_4x.ps1) as "bos"/"range_fade" — swept
+  side by side with them, same "not a hard swap" philosophy as when
+  range_fade was added.
 
 VALIDATION STANDARD — matches the sister project's own bar, not a looser
 one built for this project specifically:
@@ -266,16 +331,20 @@ SPACE = {
     "atr_window":              ATR_WINDOWS,                       # feeds deviation threshold + stop distance
     "consolidation_bars":      [5, 8, 13, 20, 30, 45],             # fair-value update sensitivity (window)
     "consolidation_atr_mult":  [0.5, 0.75, 1.0, 1.25, 1.5],        # fair-value update sensitivity (tightness) — ceiling lowered from 2.0 2026-08-25, see docstring
-    "deviation_threshold_atr": [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0],# distance from fair value to start trading — BOS entry_mode only, see docstring
-    "entry_mode":              ["bos", "range_fade"],              # added 2026-08-26 — see docstring's entry-mode note
-    "bos_mode":                ["fractal", "raw_wick"],            # added 2026-08-25 — see docstring's frequency-fix note. entry_mode="bos" only.
-    "bos_lookback_bars":       [1, 2, 3, 5, 8, 13, 20, 30, 45, 60],# widened down to 1-3 2026-08-25 for genuine 1-minute-scale structure. entry_mode="bos" only.
-    "bos_confirm_bars":        [1, 2, 3, 5],                      # signal to enter — how convincing the break must be. entry_mode="bos" only.
-    "extension_lookback_bars": [1, 3, 5, 10, 20],                  # added 2026-08-25 — deviation no longer required on the exact BOS bar, see docstring. entry_mode="bos" only.
+    "deviation_threshold_atr": [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0],# distance from fair value to start trading — entry_mode "bos"/"static_risk" only, see docstring
+    "entry_mode":              ["bos", "range_fade", "static_risk"],# static_risk added 2026-08-26 (third same-day update) — see docstring's entry-mode note
+    "bos_mode":                ["fractal", "raw_wick"],            # added 2026-08-25 — see docstring's frequency-fix note. entry_mode "bos"/"static_risk" only.
+    "bos_lookback_bars":       [1, 2, 3, 5, 8, 13, 20, 30, 45, 60],# widened down to 1-3 2026-08-25 for genuine 1-minute-scale structure. entry_mode "bos"/"static_risk" only.
+    "bos_confirm_bars":        [1, 2, 3, 5],                      # signal to enter — how convincing the break must be. entry_mode "bos"/"static_risk" only.
+    "extension_lookback_bars": [1, 3, 5, 10, 20],                  # added 2026-08-25 — deviation no longer required on the exact BOS bar, see docstring. entry_mode "bos"/"static_risk" only.
     "fade_zone_pct":           [0.10, 0.15, 0.20, 0.25, 0.30, 0.40],# added 2026-08-26 — how close to the range edge counts as "faded". entry_mode="range_fade" only, see docstring.
-    "require_htf_confirm":     [False, True],                     # added 2026-08-26 — 5-min structure must not have just broken the opposite way. Needs precompute.py's htf_swing_*_confirmed columns.
+    "require_htf_confirm":     [False, True],                     # added 2026-08-26 — 5-min structure must not have just broken the opposite way. Needs precompute.py's htf_swing_*_confirmed columns. Applies to all entry_modes.
     "htf_lookback_bars":       [30, 60, 120, 240, 480],            # how far back (1-min bars) to check for an opposing 5-min break. require_htf_confirm=True only.
-    "target_fraction":         [0.5, 0.75, 1.0, 1.25],             # TP: how far back toward fair value (bos) / across the range (range_fade)
+    "target_fraction":         [0.5, 0.75, 1.0, 1.25],             # TP: how far back toward fair value (bos) / across the range (range_fade). Not used by entry_mode="static_risk" (see rr below).
+    "static_risk_pct":         [0.0010, 0.0015, 0.0020, 0.0025, 0.0030, 0.0040, 0.0050, 0.0075, 0.0100],
+                                                                     # static SL distance as a fraction of entry price — added 2026-08-26 (third same-day update). entry_mode="static_risk" only, see docstring.
+    "rr":                      [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0],
+                                                                     # fixed TP:SL ratio — added 2026-08-26 (third same-day update), the transcript's own "1 to 1.5" example is inside this grid. entry_mode="static_risk" only.
     "exit_horizon_bars":       [15, 30, 60, 90, 120, 180, 240, 360],
     "use_session_close":       [False, True],
     "k_buf":                   [0.1, 0.2, 0.3, 0.5],               # SL construction (structural + ATR buffer)
@@ -517,6 +586,39 @@ def generate_signals(df: pd.DataFrame, p: dict) -> List[dict]:
             range_low_arr + target_fraction * range_size_arr,
             range_high_arr - target_fraction * range_size_arr,
         )
+        # 2026-08-26 fix: the k_floor/k_cap clamp below must scale to
+        # range_size, NOT atr, for this entry_mode. range_size is itself
+        # capped at consolidation_atr_mult * ATR (<=1.5x, often much
+        # less, since is_consolidating only requires <=, not ==) — an
+        # ATR-scaled floor (0.5-1.5x ATR) built for BOS's much larger
+        # breakout-extent anchor almost always exceeds the tiny raw
+        # near-edge distance here and silently overrides it, decoupling
+        # the stop from the range entirely while target_fraction's
+        # target stays capped by that same small range. Confirmed via a
+        # real-data check (_rf_rr_check.py, not committed): 82% of
+        # range_fade signals had reward/risk < 1.0 (median 0.49) before
+        # this fix — a full TP win paid back about HALF of what a full
+        # SL loss cost, tanking the profit factor regardless of whether
+        # the entry itself had any real directional edge. Clamping to
+        # range_size instead keeps risk and reward on the same natural
+        # scale, the same way target_fraction already does for the TP.
+        clamp_scale_arr = range_size_arr
+    elif entry_mode == "static_risk":
+        # Added 2026-08-26 (third same-day update) — see docstring's
+        # entry-mode note. NOT structural/ATR-clamped at all: one fixed
+        # % of entry price, identical on every trade, no swing/ATR
+        # anchoring, no k_buf/k_floor/k_cap involved. TP is a fixed
+        # risk:reward multiple of that same distance. Sets dist_arr/
+        # sl_arr directly and skips the shared k_buf/k_floor/k_cap
+        # clamp block below entirely (see the `if entry_mode !=
+        # "static_risk"` guard just after it) — that block exists
+        # specifically to express structural sizing, which this
+        # entry_mode deliberately does not use.
+        risk_pct = p["static_risk_pct"]
+        rr = p["rr"]
+        dist_arr = entry_arr * risk_pct
+        sl_arr = np.where(is_buy_arr, entry_arr - dist_arr, entry_arr + dist_arr)
+        tp_arr = np.where(is_buy_arr, entry_arr + rr * dist_arr, entry_arr - rr * dist_arr)
     else:
         bos_lookback = p["bos_lookback_bars"]
         recent_low_raw = low_s.rolling(bos_lookback, min_periods=1).min().to_numpy()[cand_idx]
@@ -527,14 +629,18 @@ def generate_signals(df: pd.DataFrame, p: dict) -> List[dict]:
             entry_arr + target_fraction * (fv_arr - entry_arr),
             entry_arr - target_fraction * (entry_arr - fv_arr),
         )
+        clamp_scale_arr = a_arr
 
     valid_tp = np.where(is_buy_arr, tp_arr > entry_arr, tp_arr < entry_arr)
 
-    k_buf, k_cap, k_floor = p["k_buf"], p["k_cap"], p["k_floor"]
-    sl_structural_arr = np.where(is_buy_arr, sl_anchor_arr - k_buf * a_arr, sl_anchor_arr + k_buf * a_arr)
-    raw_dist_arr = np.abs(entry_arr - sl_structural_arr)
-    dist_arr = np.clip(raw_dist_arr, k_floor * a_arr, k_cap * a_arr)
-    sl_arr = np.where(is_buy_arr, entry_arr - dist_arr, entry_arr + dist_arr)
+    if entry_mode != "static_risk":
+        # static_risk already set dist_arr/sl_arr directly above — it
+        # deliberately has no structural anchor to clamp against.
+        k_buf, k_cap, k_floor = p["k_buf"], p["k_cap"], p["k_floor"]
+        sl_structural_arr = np.where(is_buy_arr, sl_anchor_arr - k_buf * a_arr, sl_anchor_arr + k_buf * a_arr)
+        raw_dist_arr = np.abs(entry_arr - sl_structural_arr)
+        dist_arr = np.clip(raw_dist_arr, k_floor * clamp_scale_arr, k_cap * clamp_scale_arr)
+        sl_arr = np.where(is_buy_arr, entry_arr - dist_arr, entry_arr + dist_arr)
 
     horizon_ts_arr = idx[cand_idx] + pd.Timedelta(minutes=1) * p["exit_horizon_bars"]
     exit_idx_arr = idx.searchsorted(horizon_ts_arr, side="left")
