@@ -36,3 +36,10 @@ __pycache__/
 # OS / editor noise
 .DS_Store
 Thumbs.db
+
+# vps_full_review.py's incremental resume checkpoint — regenerable by
+# re-running the script (it resumes from results.json's own length, but
+# the checkpoint and results file are identical in content by design;
+# only the results.json is worth versioning as a preserved finding).
+vps_full_review_checkpoint.json
+

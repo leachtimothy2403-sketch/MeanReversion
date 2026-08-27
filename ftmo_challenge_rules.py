@@ -188,12 +188,23 @@ def simulate_1step(by_date, all_days, start, risk_pct):
     return {"outcome": outcome, "reason": reason, "days": n_days, "trades": n_trades, "end_equity": end_equity}
 
 
-def simulate_2step(by_date, all_days, start, risk_pct, min_days=4):
+def simulate_2step(by_date, all_days, start, risk_pct, min_days=4, max_concurrent=None):
+    """max_concurrent (2026-08-27, added for the MeanReversion project only
+    -- not yet ported back to RCTBE's source file, see this file's header):
+    caps NEW entries taken per calendar day in BOTH phases, passed straight
+    through to run_phase's existing param (see its docstring). Added after
+    a candidate's 2-step replay showed same-day entry clustering was the
+    dominant Gate-2-clean-but-not-challenge-viable failure mode (multiple
+    same-day losers stacking past the static daily-loss limit) -- capping
+    entries/day is a direct lever on that specific failure mode without
+    touching the underlying signal. Default None (uncapped) keeps every
+    existing caller byte-for-byte identical, same convention run_phase
+    itself already established."""
     days = walk_days(by_date, all_days, start)
     risk_amt_p1 = START_EQUITY * risk_pct
     o1, r1, d1, t1, eq1, last_idx1 = run_phase(
         by_date, days, risk_amt_p1, target_equity=110_000.0, fail_equity=90_000.0,
-        daily_loss_limit=5_000.0, min_days=min_days)
+        daily_loss_limit=5_000.0, min_days=min_days, max_concurrent=max_concurrent)
     if o1 != "PASS":
         return {"outcome": o1, "phase": 1, "reason": r1, "days": d1, "trades": t1, "end_equity": eq1}
 
@@ -202,6 +213,6 @@ def simulate_2step(by_date, all_days, start, risk_pct, min_days=4):
     risk_amt_p2 = START_EQUITY * risk_pct  # same % risk, of the RESET 100k balance
     o2, r2, d2, t2, eq2, _ = run_phase(
         by_date, phase2_days, risk_amt_p2, target_equity=105_000.0, fail_equity=90_000.0,
-        daily_loss_limit=5_000.0, min_days=min_days)
+        daily_loss_limit=5_000.0, min_days=min_days, max_concurrent=max_concurrent)
     return {"outcome": o2, "phase": 2, "reason": r2, "days": d1 + d2, "days_p1": d1, "days_p2": d2,
             "trades": t1 + t2, "end_equity": eq2}
