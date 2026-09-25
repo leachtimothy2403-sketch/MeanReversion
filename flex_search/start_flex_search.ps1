@@ -1,16 +1,14 @@
 # flex_search launcher (VPS). One command: checks the environment, then runs the whole staged search
 # (stage1 -> stage2 -> stage3 -> stage4 + 2016-2023 stress) in ONE hidden, BelowNormal-priority Python process
-# that uses a 4-worker pool. Resumable: re-running this script skips stage-1 work already saved in results\.
+# that uses a 4-worker pool. Resumable: re-running this script skips stage-1 work already saved.
 #
 #   cd C:\Users\Administrator\MeanReversion\flex_search
-#   .\start_flex_search.ps1                 # default settings
-#   .\start_flex_search.ps1 -N1 40000       # more stage-1 configs per session
-#   .\start_flex_search.ps1 -Market cfd -Challenge ftmo2    # FTMO 2-step on the NDX100 CFD (results_ftmo2_cfd\)
+#   .\start_flex_search.ps1                                  # FundedNext Flex on NQ (results\)
+#   .\start_flex_search.ps1 -Market cfd -Challenge ftmo2     # FTMO 2-step on the NDX100 CFD (results_ftmo2_cfd\)
 #
-# Progress:   Get-Content .\results\run.log -Tail 20 -Wait
-# Stop:       Stop-Process -Id <PID printed at start> (the pool workers exit with it); re-run this script to resume
+# Stop:  Stop-Process -Id <PID printed at start>; re-run this script to resume
 param(
-    [ValidateSet("nq", "cfd")] [string]$Market = "nq",           # nq = NQ futures (FundedNext); cfd = NDX100 CFD (FTMO)
+    [ValidateSet("nq", "cfd")] [string]$Market = "nq",
     [ValidateSet("flex", "ftmo2")] [string]$Challenge = "flex",
     [int]$Workers = 4,
     [int]$N1 = 30000,
@@ -30,14 +28,13 @@ if (-not $env:MR_NQ_PARQUET -and -not $env:MR_CFD_PARQUET -and -not (Test-Path $
     Write-Host "Copy the data file from the laptop to that path (data is not in git)." -ForegroundColor Red
     exit 1
 }
-# Prefer "python" (the interpreter pip installs into); fall back to the "py" launcher.
-$exe = if (Get-Command python -ErrorAction SilentlyContinue) { "python" } else { "py" }
-Write-Host "Using: $exe  ($(& $exe --version 2>&1))"
+# Use the Windows "py" launcher (plain "python" is the Microsoft Store stub on this VPS).
+Write-Host "Using: $(py -3 --version 2>&1)"
 Write-Host "Checking Python packages (numpy, pandas, pyarrow, tzdata)..."
-& $exe -m pip install --quiet numpy pandas pyarrow tzdata
+py -3 -m pip install --quiet numpy pandas pyarrow tzdata
 New-Item -ItemType Directory -Force -Path (Join-Path $here "logs") | Out-Null
-$argLine = "fs_search.py all --workers $Workers --n1 $N1 --top2 $Top2 --nn $NN --k3 $K3 --r3 $R3 --top4 $Top4 --stress"
-$p = Start-Process -FilePath $exe -ArgumentList $argLine -WorkingDirectory $here -WindowStyle Hidden -PassThru `
+$argLine = "-3 fs_search.py all --workers $Workers --n1 $N1 --top2 $Top2 --nn $NN --k3 $K3 --r3 $R3 --top4 $Top4 --stress"
+$p = Start-Process -FilePath "py" -ArgumentList $argLine -WorkingDirectory $here -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $here "logs\stdout.log") -RedirectStandardError (Join-Path $here "logs\stderr.log")
 Start-Sleep -Seconds 2
 try { $p.PriorityClass = "BelowNormal" } catch {}
