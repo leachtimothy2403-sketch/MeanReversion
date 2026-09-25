@@ -1,4 +1,4 @@
-# flex_search: FundedNext Futures Flex $100K strategy search (NQ -> MNQ)
+# flex_search: prop-challenge strategy search (FundedNext Flex on NQ/MNQ, FTMO 2-step on the NDX100 CFD)
 
 Pre-registered 2026-09-25. Staged, resumable search across three sessions, each with its own parameters:
 ASIA (09:00 Tokyo), LDN (08:00 London), NY (09:30 New York). Each session can also be switched off.
@@ -38,9 +38,23 @@ Point-valued knobs are scaled per session (NY 1.0, LDN 0.4, ASIA 0.3).
 
 Costs per MNQ contract round trip: NY 1.24 pt, LDN 1.5, ASIA 1.75.
 
-**Smart sizing** (stage-3 knob: off / "min" / 0.25 / 0.5):
-- (a) Near the $105k target, each new trade is sized so that its take-profit just reaches $105k.
-- (b) After $105k, when the consistency rule has raised the target, trades are 1 MNQ ("min") or that fraction of normal size.
+**Smart sizing** (stage-3 knob: off / "min" / "cap1" / "cap0.5"):
+- (a) Below $105k, a trade is sized so its take-profit just reaches $105k whenever that needs fewer contracts than normal.
+- (b) After $105k, if the 40% consistency rule is not yet met (the best day is more than 40% of total profit), we keep adding profitable days to dilute it:
+  - "min": 1 MNQ per trade (for comparison; slow).
+  - "capX": X × normal size. New entries stop once today's realized profit is within $50 of the best day so far, so no day can become a new best day. No entry is taken whose full stop would take the balance below $101,000 (cushion above the $100,100 locked loss limit).
 
 **Run on the VPS** `.\start_flex_search.ps1` (defaults: 4 workers, 30,000 configs per session; roughly 1.5-3 h).
 When `results\DONE` exists, commit `results\` (stage-1 raw CSVs are gitignored).
+
+**FTMO 2-step mode** (`.\start_flex_search.ps1 -Market cfd -Challenge ftmo2`, results in `results_ftmo2_cfd\`):
+- Data: `..\CFDData\ndx100_dukascopy_1min.parquet`, built on the laptop by `CFDData\build_cfd_24h.py` from the Dukascopy cache. Copy it to the VPS; it is not in git. Data ends 2026-08-24, so the final holdout is 2026-07-01..08-24.
+- Costs: 1.83 pt NY, 2.5 LDN, 3.0 ASIA. $1/pt per lot, 0.01-lot sizing.
+- Rules:
+  - Phase 1 +10%, then Phase 2 at $100k +5%.
+  - Daily loss: equity incl. floating (each trade's MAE) may not fall below the day-start balance − $5,000.
+  - Static $90,000 floor. ≥ 4 trading days per phase. No consistency rule.
+- Challenge knobs:
+  - risk $250–2,000 per trade (0.25–2%)
+  - breaker $2k / $3k / $4k / off
+  - smart "near": size the trade so its TP just reaches the phase target; once the target is hit but fewer than 4 trading days are done, take only 0.01-lot trades to collect days

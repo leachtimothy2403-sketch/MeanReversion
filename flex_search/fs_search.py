@@ -7,6 +7,8 @@
   stage4  report the top combos on the held-out weeks, the contiguous search window, the final holdout
           (2026-07-01..09-15, first look)
 Usage:  python fs_search.py all --workers 4 [--n1 20000]
+        env FS_MARKET=nq|cfd, FS_CHALLENGE=flex|ftmo2 select data + challenge (defaults nq / flex); results go to
+        results/ (nq+flex) or results_<challenge>_<market>/
         python fs_search.py stage1|stage2|stage3|stage4 ...
 Outputs in flex_search/results/ ; progress in flex_search/results/run.log
 """
@@ -18,7 +20,8 @@ from fs_engine import sim
 import fs_space as SP
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RES = os.path.join(HERE, "results"); os.makedirs(RES, exist_ok=True)
+RES = os.path.join(HERE, "results" if (SP.MARKET, SP.CHALLENGE) == ("nq", "flex") else f"results_{SP.CHALLENGE}_{SP.MARKET}")
+os.makedirs(RES, exist_ok=True)
 def log(*a):
     msg = time.strftime("%Y-%m-%d %H:%M:%S ") + " ".join(str(x) for x in a)
     print(msg, flush=True); open(os.path.join(RES, "run.log"), "a").write(msg + "\n")
@@ -142,7 +145,9 @@ def merge_days(trades_by_sess, g=None):
     return out
 
 def ncon(risk, sl, size):
-    return max(1, min(SP.MAXC, math.floor(risk / (sl * SP.PV) * size)))
+    """position size in contracts (nq: whole MNQ) or lots (cfd: 0.01 steps) for a $ risk at stop distance sl"""
+    n = math.floor(risk / (sl * SP.PV) * size / SP.LOT + 1e-9) * SP.LOT
+    return max(SP.LOT, min(SP.MAXC, n))
 
 def day_usd(merged, D, risk, breaker, pstop):
     """Plain per-day $ P&L (no challenge state) for reporting."""
@@ -157,13 +162,19 @@ def day_usd(merged, D, risk, breaker, pstop):
         pnl[i] = sum(x[0] for x in taken); ntr[i] = len(taken)
     return pnl, ntr
 
-def run_day(ev, bal, floor, risk, breaker, pstop, smart, small):
+def run_day(ev, bal, floor, risk, breaker, pstop, smart, small, best=0.0):
     """One day of a challenge. Returns (balance, failed, small). Entries in entry order; exits applied when their bar
-    has passed. smart sizing (None = off; "min" | 0.25 | 0.5): (a) while below the base target, a trade is sized so its
-    take-profit would just reach the $105k target when that needs fewer contracts than the normal risk; (b) once the
-    balance has reached $105k (the consistency rule has raised the target), every further trade is 1 MNQ ("min") or
-    that fraction of the normal size (at least 1 MNQ)."""
+    has passed.
+    smart sizing (None = off; "min" | "cap1" | "cap0.5"):
+      (a) below $105k: a trade is sized so its take-profit would just reach $105k when that needs fewer contracts
+          than the normal risk.
+      (b) once the balance has reached $105k (target not yet met because a big day triggered the 40% consistency rule):
+          "min"    -> 1 MNQ per trade;
+          "capX"   -> X x normal size, no new entries once today's realized profit is within $50 of the best day so
+                      far (so no day can become a new best day), and no entry whose full stop-loss would take the
+                      balance below $101,000 (cushion above the $100,100 locked loss limit)."""
     F = SP.FLEX; goal = F["start"] + F["target"]; realized = 0.0; opn = []
+    capf = float(smart[3:]) if isinstance(smart, str) and smart.startswith("cap") else None
     def exits_until(key, bal, realized, small):
         nonlocal opn
         opn.sort(key=lambda x: x[0]); keep = []
@@ -182,8 +193,15 @@ def run_day(ev, bal, floor, risk, breaker, pstop, smart, small):
         if pstop is not None and realized >= pstop: continue
         n = ncon(risk, e[3], e[5])
         if smart is not None:
-            if small: n = 1 if smart == "min" else max(1, math.floor(n * smart))
-            elif goal - bal > 0: n = min(n, max(1, math.ceil((goal - bal) / (e[4] * SP.PV))))
+            if small:
+                if smart == "min":
+                    n = 1
+                else:
+                    n = max(1, math.floor(n * capf))
+                    if best > 0 and realized >= best - 50: continue
+                    if bal - n * e[3] * SP.PV - sum(x[2] for x in opn) < 101000: continue
+            elif goal - bal > 0:
+                n = min(n, max(SP.LOT, math.ceil((goal - bal) / (e[4] * SP.PV) / SP.LOT) * SP.LOT))
         opn.append((e[1], e[2] * SP.PV * n, e[6] * SP.PV * n))
     bal, realized, small, dead = exits_until(None, bal, realized, small)
     return bal, dead, small
@@ -199,7 +217,7 @@ def flex_cohorts(merged, seq, risk, breaker, pstop, smart, starts=None, g=None):
         bal = F["start"]; peak = bal; floor = bal - F["mll"]; best = 0.0; out = None; small = False
         for k in range(s0, len(seq)):
             b0 = bal
-            bal, dead, small = run_day(merged.get(seq[k], []), bal, floor, risk, breaker, pstop, smart, small)
+            bal, dead, small = run_day(merged.get(seq[k], []), bal, floor, risk, breaker, pstop, smart, small, best)
             if dead: out = ("FAIL", k - s0 + 1); break
             best = max(best, bal - b0); tgt = max(F["target"], best / F["consistency"])
             if bal - F["start"] >= tgt: out = ("PASS", k - s0 + 1); break
@@ -210,6 +228,68 @@ def flex_cohorts(merged, seq, risk, breaker, pstop, smart, starts=None, g=None):
     return dict(cohorts=len(res), passed=len(P), failed=len(Fl), open=len(res) - resolved,
                 pass_rate=round(len(P) / resolved, 3) if resolved else 0.0, med_days=float(np.median(P)) if P else None)
 
+
+def ftmo_run_day(ev, bal, risk, breaker, smart, goal, need_days):
+    """One FTMO day. Returns (balance, fail_reason or None, traded). Daily limit: equity may not drop below the
+    day-start balance - $5,000; static floor $90,000 (both checked with each trade's adverse excursion).
+    smart "near": (a) size so the TP just reaches the phase target when that needs less than normal size;
+    (b) once the target is reached but fewer than 4 trading days are done, trade only the day's first signal
+    at the minimum lot (0.01) to collect the trading day."""
+    F = SP.FTMO; day0 = bal; lim = max(day0 - F["dll"], F["floor"]); realized = 0.0; opn = []; traded = False; nent = 0
+    def exits_until(key, bal, realized):
+        nonlocal opn
+        opn.sort(key=lambda x: x[0]); keep = []
+        for x in opn:
+            if key is None or x[0] < key:
+                if bal - x[2] <= lim: return bal, realized, ("daily loss limit" if day0 - F["dll"] >= F["floor"] else "max loss")
+                bal += x[1]; realized += x[1]
+                if bal <= lim: return bal, realized, ("daily loss limit" if day0 - F["dll"] >= F["floor"] else "max loss")
+            else: keep.append(x)
+        opn = keep
+        return bal, realized, None
+    for e in ev:
+        bal, realized, why = exits_until(e[0], bal, realized)
+        if why: return bal, why, traded
+        if breaker is not None and realized <= -breaker: continue
+        n = ncon(risk, e[3], e[5])
+        if smart == "near":
+            if bal >= goal:
+                if need_days <= 0 or nent >= 1: continue
+                n = SP.LOT
+            elif goal - bal > 0:
+                n = min(n, max(SP.LOT, math.ceil((goal - bal) / (e[4] * SP.PV) / SP.LOT) * SP.LOT))
+        opn.append((e[1], e[2] * SP.PV * n, e[6] * SP.PV * n)); traded = True; nent += 1
+    bal, realized, why = exits_until(None, bal, realized)
+    return bal, why, traded
+
+def ftmo_cohorts(merged, seq, risk, breaker, pstop, smart, starts=None, g=None, detail=False):
+    """Weekly FTMO 2-step cohorts over the day sequence: Phase 1 (+10%), then Phase 2 from the next day at $100k (+5%)."""
+    g = g or load(); F = SP.FTMO; days = g["days"]
+    if starts is None:
+        wk = pd.to_datetime(pd.Series([days[i] for i in seq])).dt.to_period("W-SUN")
+        starts = [k for k in range(len(seq)) if k == 0 or wk.iloc[k] != wk.iloc[k - 1]]
+    res = []
+    for s0 in starts:
+        phase, bal, goal, tdays, out = 1, F["start"], F["start"] + F["t1"], 0, None
+        for k in range(s0, len(seq)):
+            bal, why, traded = ftmo_run_day(merged.get(seq[k], []), bal, risk, breaker, smart, goal, F["min_days"] - tdays)
+            tdays += int(traded)
+            if why: out = ("FAIL", k - s0 + 1, f"P{phase} {why}"); break
+            if bal >= goal and tdays >= F["min_days"]:
+                if phase == 1: phase, bal, goal, tdays = 2, F["start"], F["start"] + F["t2"], 0
+                else: out = ("PASS", k - s0 + 1, ""); break
+        res.append(out or ("OPEN", len(seq) - s0, f"P{phase}"))
+    P = [d for o, d, _ in res if o == "PASS"]; Fl = [d for o, d, _ in res if o == "FAIL"]
+    resolved = len(P) + len(Fl)
+    out = dict(cohorts=len(res), passed=len(P), failed=len(Fl), open=len(res) - resolved,
+               pass_rate=round(len(P) / resolved, 3) if resolved else 0.0, med_days=float(np.median(P)) if P else None,
+               fail_daily=sum(1 for o, _, w in res if o == "FAIL" and "daily" in w), fail_max=sum(1 for o, _, w in res if o == "FAIL" and "max" in w))
+    return out
+
+def challenge_cohorts(merged, seq, risk, breaker, pstop, smart, g=None):
+    if SP.CHALLENGE == "ftmo2": return ftmo_cohorts(merged, seq, risk, breaker, pstop, smart, g=g)
+    return flex_cohorts(merged, seq, risk, breaker, pstop, smart, g=g)
+
 _C = {}
 def _s3(args):
     combo, settings = args
@@ -218,7 +298,7 @@ def _s3(args):
     D = len(G["days"]); out = []
     for risk, brk, ps, smart in settings:
         pnl, ntr = day_usd(merged, D, risk, brk, ps)
-        tr = flex_cohorts(merged, list(G["train"]), risk, brk, ps, smart)
+        tr = challenge_cohorts(merged, list(G["train"]), risk, brk, ps, smart)
         out.append(dict(combo=json.dumps(combo), risk=risk, breaker=brk, pstop=ps, smart=smart,
                         trades_per_day=round(ntr[G["train"]].mean(), 2), usd_train=round(pnl[G["train"]].sum()), **tr))
     return out
@@ -263,12 +343,13 @@ def _nan(x): return None if x is None or (isinstance(x, float) and math.isnan(x)
 def _smart(x):
     x = _nan(x)
     if x is None or x == "None": return None
-    return "min" if x == "min" else float(x)
+    return str(x)
 
 def stage4(a):
     load(); cand = json.load(open(os.path.join(RES, "stage3_candidates.json")))
     s3 = pd.read_csv(os.path.join(RES, "stage3.csv"))
-    s3 = s3[s3.passed >= 10].head(a.top4)
+    s3 = s3[s3.passed >= 10]
+    s3 = s3.sort_values(["pass_rate", "passed"], ascending=False).drop_duplicates(["combo", "risk", "breaker", "pstop"]).head(a.top4)
     allidx = list(range(len(G["days"]))); D = len(G["days"]); cache = {}
     def tb(s, c):
         if (s, c) not in cache: cache[(s, c)] = session_trades(s, cand[s][c], allidx)
@@ -281,8 +362,8 @@ def stage4(a):
         pnl, ntr = day_usd(merged, D, r["risk"], brk, ps)
         row = dict(r)
         for lab in ("train", "held", "final"): row[f"{lab}_usd_per_day"] = round(pnl[G[lab]].mean(), 1)
-        cs = flex_cohorts(merged, list(G["search"]), r["risk"], brk, ps, smart); row.update({f"search_{k}": v for k, v in cs.items()})
-        cf = flex_cohorts(merged, list(G["final"]), r["risk"], brk, ps, smart); row.update({f"final_{k}": v for k, v in cf.items()})
+        cs = challenge_cohorts(merged, list(G["search"]), r["risk"], brk, ps, smart); row.update({f"search_{k}": v for k, v in cs.items()})
+        cf = challenge_cohorts(merged, list(G["final"]), r["risk"], brk, ps, smart); row.update({f"final_{k}": v for k, v in cf.items()})
         for s, c in sessions.items():
             row[f"{s}_params"] = json.dumps(cand[s][c])
             for lab in ("train", "held", "final"):
@@ -299,12 +380,12 @@ def stage4(a):
     for name, P in BASES.items():
         merged = merge_days({"NY": session_trades("NY", P, allidx)})
         for risk in SP.RISK:
-            for brk in (1000, None):
+            for brk in ((1000, None) if SP.CHALLENGE == "flex" else (2000, None)):
                 for smart in SP.SMART:
                     pnl, ntr = day_usd(merged, D, risk, brk, None)
                     row = dict(baseline=name, risk=risk, breaker=brk, smart=smart)
                     for lab in ("train", "search", "final"):
-                        c = flex_cohorts(merged, list(G[lab]), risk, brk, None, smart); row.update({f"{lab}_{k}": v for k, v in c.items()})
+                        c = challenge_cohorts(merged, list(G[lab]), risk, brk, None, smart); row.update({f"{lab}_{k}": v for k, v in c.items()})
                     for lab in ("train", "held", "final"): row[f"{lab}_usd_per_day"] = round(pnl[G[lab]].mean(), 1)
                     brows.append(row)
     bdf = pd.DataFrame(brows); bdf.to_csv(os.path.join(RES, "stage4_baselines.csv"), index=False)
@@ -318,7 +399,7 @@ def stage4(a):
             brk, ps = _nan(row["breaker"]), _nan(row["pstop"])
             pnl2, _ = day_usd(merged, len(all2), row["risk"], brk, ps)
             for y, v in pd.Series(pnl2).groupby(yrs).sum().items(): row[f"stress_usd_{y}"] = round(v)
-            cs = flex_cohorts(merged, all2, row["risk"], brk, ps, _smart(row["smart"]), g=g2); row.update({f"stress_{k}": v for k, v in cs.items()})
+            cs = challenge_cohorts(merged, all2, row["risk"], brk, ps, _smart(row["smart"]), g=g2); row.update({f"stress_{k}": v for k, v in cs.items()})
     df = pd.DataFrame(out); df.to_csv(os.path.join(RES, "stage4_report.csv"), index=False)
     log("stage4 written:", len(df), "rows")
     cols = ["combo", "risk", "breaker", "pstop", "smart", "pass_rate", "search_pass_rate", "final_passed", "final_failed", "final_open",

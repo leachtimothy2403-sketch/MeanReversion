@@ -5,40 +5,44 @@
 #   cd C:\Users\Administrator\MeanReversion\flex_search
 #   .\start_flex_search.ps1                 # default settings
 #   .\start_flex_search.ps1 -N1 40000       # more stage-1 configs per session
+#   .\start_flex_search.ps1 -Market cfd -Challenge ftmo2    # FTMO 2-step on the NDX100 CFD (results_ftmo2_cfd\)
 #
 # Progress:   Get-Content .\results\run.log -Tail 20 -Wait
 # Stop:       Stop-Process -Id <PID printed at start> (the pool workers exit with it); re-run this script to resume
 param(
+    [ValidateSet("nq", "cfd")] [string]$Market = "nq",           # nq = NQ futures (FundedNext); cfd = NDX100 CFD (FTMO)
+    [ValidateSet("flex", "ftmo2")] [string]$Challenge = "flex",
     [int]$Workers = 4,
     [int]$N1 = 30000,
     [int]$Top2 = 300,
     [int]$NN = 16,
     [int]$K3 = 12,
     [int]$R3 = 12,
-    [int]$Top4 = 60
+    [int]$Top4 = 100
 )
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $here
-$data = Join-Path $here "..\NASDAQFuturesData\nq_continuous_1min.parquet"
-if (-not $env:MR_NQ_PARQUET -and -not (Test-Path $data)) {
+$env:FS_MARKET = $Market; $env:FS_CHALLENGE = $Challenge
+$data = if ($Market -eq "cfd") { Join-Path $here "..\CFDData\ndx100_dukascopy_1min.parquet" } else { Join-Path $here "..\NASDAQFuturesData\nq_continuous_1min.parquet" }
+if (-not $env:MR_NQ_PARQUET -and -not $env:MR_CFD_PARQUET -and -not (Test-Path $data)) {
     Write-Host "Missing data file: $data" -ForegroundColor Red
-    Write-Host "Copy NASDAQFuturesData\nq_continuous_1min.parquet from the laptop (it is not in git), or set `$env:MR_NQ_PARQUET." -ForegroundColor Red
+    Write-Host "Copy the data file from the laptop to that path (data is not in git)." -ForegroundColor Red
     exit 1
 }
-$py = (Get-Command py -ErrorAction SilentlyContinue)
-$exe = if ($py) { "py" } else { "python" }
-$pre = if ($py) { @("-3") } else { @() }
+# Prefer "python" (the interpreter pip installs into); fall back to the "py" launcher.
+$exe = if (Get-Command python -ErrorAction SilentlyContinue) { "python" } else { "py" }
+Write-Host "Using: $exe  ($(& $exe --version 2>&1))"
 Write-Host "Checking Python packages (numpy, pandas, pyarrow, tzdata)..."
-& $exe @pre -m pip install --quiet numpy pandas pyarrow tzdata
+& $exe -m pip install --quiet numpy pandas pyarrow tzdata
 New-Item -ItemType Directory -Force -Path (Join-Path $here "logs") | Out-Null
-$pyArgs = $pre + @("fs_search.py", "all", "--workers", $Workers, "--n1", $N1, "--top2", $Top2, "--nn", $NN,
-                 "--k3", $K3, "--r3", $R3, "--top4", $Top4, "--stress")
-$p = Start-Process -FilePath $exe -ArgumentList $pyArgs -WorkingDirectory $here -WindowStyle Hidden -PassThru `
+$argLine = "fs_search.py all --workers $Workers --n1 $N1 --top2 $Top2 --nn $NN --k3 $K3 --r3 $R3 --top4 $Top4 --stress"
+$p = Start-Process -FilePath $exe -ArgumentList $argLine -WorkingDirectory $here -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $here "logs\stdout.log") -RedirectStandardError (Join-Path $here "logs\stderr.log")
 Start-Sleep -Seconds 2
 try { $p.PriorityClass = "BelowNormal" } catch {}
 Write-Host "Started flex_search (PID $($p.Id)) with $Workers workers, N1=$N1 per session." -ForegroundColor Green
 Set-Content -Path (Join-Path $here "logs\pid.txt") -Value $p.Id
-Write-Host "Progress:  Get-Content .\results\run.log -Tail 20 -Wait"
-Write-Host "Finished when .\results\DONE exists. Then commit results: git add results; git commit -m 'flex_search results'; git push"
+$resDir = if ($Market -eq "nq" -and $Challenge -eq "flex") { "results" } else { "results_$($Challenge)_$($Market)" }
+Write-Host "Progress:  Get-Content .\$resDir\run.log -Tail 20 -Wait"
+Write-Host "Finished when .\$resDir\DONE exists. Then commit: git add $resDir; git commit -m 'search results'; git push"

@@ -1,0 +1,37 @@
+{
+ "bench": {
+  "baseline": "LIVE+MA100",
+  "risk": "250",
+  "breaker": NaN,
+  "smart": "cap0.5",
+  "train_cohorts": "76",
+  "train_passed": "43",
+  "train_failed": "28",
+  "train_open": "5",
+  "train_pass_rate": "0.606",
+  "train_med_days": "61.0",
+  "search_cohorts": "94",
+  "search_passed": "49",
+  "search_failed": "42",
+  "search_open": "3",
+  "search_pass_rate": "0.538",
+  "search_med_days": "56.0",
+  "final_cohorts": "12",
+  "final_passed": "3",
+  "final_failed": "5",
+  "final_open": "4",
+  "final_pass_rate": "0.375",
+  "final_med_days": "13.0",
+  "train_usd_per_day": "65.4",
+  "held_usd_per_day": "14.6",
+  "final_usd_per_day": "42.4"
+ },
+ "bench_stress": {
+  "cohorts": 381,
+  "passed": 78,
+  "failed": 289,
+  "open": 14,
+  "pass_rate": 0.213,
+  "med_days": 183.0
+ }
+}

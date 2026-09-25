@@ -1,9 +1,11 @@
 """Search space, splits, costs and challenge rules for flex_search. Pre-registered 2026-09-25 (before any results)."""
-import numpy as np, pandas as pd
+import os, numpy as np, pandas as pd
+MARKET = os.environ.get("FS_MARKET", "nq")          # nq | cfd
+CHALLENGE = os.environ.get("FS_CHALLENGE", "flex")  # flex (FundedNext Futures Flex 100K) | ftmo2 (FTMO 2-step 100K)
 
 # ---- splits ---------------------------------------------------------------------------------------------------
 SEARCH = ("2024-09-16", "2026-06-30")     # selection happens only on these days MINUS the held-out weeks
-FINAL = ("2026-07-01", "2026-09-15")      # final holdout, evaluated once in stage 4
+FINAL = ("2026-07-01", "2026-09-15") if MARKET == "nq" else ("2026-07-01", "2026-08-24")   # final holdout (CFD data ends 08-24)
 def heldout_days(days):
     """One rotating week per calendar month inside SEARCH: month #m (from Sep 2024) holds out its ((m % 4)+1)-th
     Monday-starting week (clipped to the month's last week). Returns a set of day strings."""
@@ -17,12 +19,19 @@ def heldout_days(days):
     return out
 
 # ---- costs (points per contract, round trip, incl. commission + slippage estimate) -----------------------------
-COST = {"NY": 1.24, "LDN": 1.5, "ASIA": 1.75}
-PV = 2.0          # MNQ $ per point
-MAXC = 50         # FundedNext Flex 100K: 5 minis / 50 micros
+if MARKET == "nq":
+    COST = {"NY": 1.24, "LDN": 1.5, "ASIA": 1.75}
+    PV, LOT, MAXC = 2.0, 1.0, 50       # MNQ $2/pt, whole contracts, Flex 100K max 50 micros
+else:   # FTMO US100.cash: $1 per point per lot, 0.01-lot steps; spread cost (wider outside NY hours)
+    COST = {"NY": 1.83, "LDN": 2.5, "ASIA": 3.0}
+    PV, LOT, MAXC = 1.0, 0.01, 500.0
 
 # ---- FundedNext Futures Flex $100K (fundednext.com/futures/flex, Sept 2026) ------------------------------------
 FLEX = dict(start=100000.0, target=5000.0, mll=2500.0, lock=100100.0, consistency=0.40)
+# ---- FTMO 2-step $100K (ftmo.com/en/trading-objectives, Sept 2026) ----------------------------------------------
+# Phase 1 +10%, Phase 2 (reset to 100k) +5%; max daily loss = balance at 00:00 CE(S)T - $5,000 (equity incl. floating);
+# max loss static $90,000; >= 4 trading days (a day with a position opened) per phase; no best-day rule in 2-step.
+FTMO = dict(start=100000.0, t1=10000.0, t2=5000.0, dll=5000.0, floor=90000.0, min_days=4)
 
 # ---- per-session knob grids ------------------------------------------------------------------------------------
 # point-denominated knobs are NY-base values scaled by the session's typical range (median 2h range NY 201 /
@@ -65,4 +74,9 @@ def is_dead(P):
 RISK = [250, 375, 500, 750, 1000]          # $ risk per full-size trade -> MNQ contracts = floor(risk / (sl * 2))
 BREAKER = [500, 750, 1000, 1500, None]     # stop new entries once the day's realized loss reaches this
 PROFIT_STOP = [None, 1500, 1900]           # stop new entries once the day's realized profit reaches this (consistency)
-SMART = [None, "min", 0.25, 0.5]            # near-target sizing + reduced size after $105k (see fs_search.run_day)
+SMART = [None, "min", "cap1", "cap0.5"]     # near-target sizing + post-$105k mode (see fs_search.run_day)
+if CHALLENGE == "ftmo2":
+    RISK = [250, 500, 750, 1000, 1500, 2000]   # $ per trade = 0.25% .. 2% of $100k (0.01-lot sizing)
+    BREAKER = [2000, 3000, 4000, None]         # 40 / 60 / 80% of the $5k daily limit, or off
+    PROFIT_STOP = [None]                       # no consistency rule in the FTMO 2-step challenge
+    SMART = [None, "near"]                     # near: TP-to-target sizing + minimum-lot trades while waiting for 4 days

@@ -9,7 +9,8 @@ Each session array holds MAXB bars from the anchor (entries use the first `windo
 truncated at the next session's anchor+0 or 17:00 ET, whichever is first (NaN padded).
 Cache: flex_search/cache/sessions_<start>_<end>.npz  (regenerable, gitignored).
 
-Data path: env MR_NQ_PARQUET, else ../NASDAQFuturesData/nq_continuous_1min.parquet relative to this folder.
+Data path (env FS_MARKET selects): nq -> MR_NQ_PARQUET or ../NASDAQFuturesData/nq_continuous_1min.parquet;
+cfd -> MR_CFD_PARQUET or ../CFDData/ndx100_dukascopy_1min.parquet (built by CFDData/build_cfd_24h.py).
 """
 import os, numpy as np, pandas as pd
 from zoneinfo import ZoneInfo
@@ -21,12 +22,16 @@ ORDER = ["ASIA", "LDN", "NY"]
 OFFSETS = (0, 30)
 MAXB = 360  # 6h of 1-min bars after the anchor (cap)
 
+MARKET = os.environ.get("FS_MARKET", "nq")   # "nq" (Databento NQ futures) or "cfd" (Dukascopy NDX100 CFD)
+
 def data_path():
+    if MARKET == "cfd":
+        return os.environ.get("MR_CFD_PARQUET", os.path.join(HERE, "..", "CFDData", "ndx100_dukascopy_1min.parquet"))
     return os.environ.get("MR_NQ_PARQUET", os.path.join(HERE, "..", "NASDAQFuturesData", "nq_continuous_1min.parquet"))
 
 def build(start="2024-01-02", end="2026-09-15"):
     cache = os.path.join(HERE, "cache"); os.makedirs(cache, exist_ok=True)
-    fn = os.path.join(cache, f"sessions_{start}_{end}.npz")
+    fn = os.path.join(cache, ("" if MARKET == "nq" else MARKET + "_") + f"sessions_{start}_{end}.npz")
     if os.path.exists(fn):
         z = np.load(fn, allow_pickle=True); return {k: z[k] for k in z.files}
     df = pd.read_parquet(data_path(), columns=["open", "high", "low", "close", "volume"]).sort_index()

@@ -2,6 +2,6 @@
 cache/
 __pycache__/
 # stage-1 raw results are large; stage2/3/4 CSVs + run.log are the ones to commit
-results/stage1_*.csv
-results/DONE
+results*/stage1_*.csv
+results*/DONE
 logs/
