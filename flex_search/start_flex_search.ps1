@@ -30,14 +30,13 @@ if (-not $env:MR_NQ_PARQUET -and -not $env:MR_CFD_PARQUET -and -not (Test-Path $
     Write-Host "Copy the data file from the laptop to that path (data is not in git)." -ForegroundColor Red
     exit 1
 }
-# Prefer "python" (the interpreter pip installs into); fall back to the "py" launcher.
-$exe = if (Get-Command python -ErrorAction SilentlyContinue) { "python" } else { "py" }
-Write-Host "Using: $exe  ($(& $exe --version 2>&1))"
+# Use the Windows "py" launcher (the plain "python" command can be the Microsoft Store stub on this VPS).
+Write-Host "Using: $(py -3 --version 2>&1)"
 Write-Host "Checking Python packages (numpy, pandas, pyarrow, tzdata)..."
-& $exe -m pip install --quiet numpy pandas pyarrow tzdata
+py -3 -m pip install --quiet numpy pandas pyarrow tzdata
 New-Item -ItemType Directory -Force -Path (Join-Path $here "logs") | Out-Null
-$argLine = "fs_search.py all --workers $Workers --n1 $N1 --top2 $Top2 --nn $NN --k3 $K3 --r3 $R3 --top4 $Top4 --stress"
-$p = Start-Process -FilePath $exe -ArgumentList $argLine -WorkingDirectory $here -WindowStyle Hidden -PassThru `
+$argLine = "-3 fs_search.py all --workers $Workers --n1 $N1 --top2 $Top2 --nn $NN --k3 $K3 --r3 $R3 --top4 $Top4 --stress"
+$p = Start-Process -FilePath "py" -ArgumentList $argLine -WorkingDirectory $here -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $here "logs\stdout.log") -RedirectStandardError (Join-Path $here "logs\stderr.log")
 Start-Sleep -Seconds 2
 try { $p.PriorityClass = "BelowNormal" } catch {}
