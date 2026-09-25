@@ -1,14 +1,16 @@
 # flex_search launcher (VPS). One command: checks the environment, then runs the whole staged search
 # (stage1 -> stage2 -> stage3 -> stage4 + 2016-2023 stress) in ONE hidden, BelowNormal-priority Python process
-# that uses a 4-worker pool. Resumable: re-running this script skips stage-1 work already saved.
+# that uses a 4-worker pool. Resumable: re-running this script skips stage-1 work already saved in results\.
 #
 #   cd C:\Users\Administrator\MeanReversion\flex_search
-#   .\start_flex_search.ps1                                  # FundedNext Flex on NQ (results\)
-#   .\start_flex_search.ps1 -Market cfd -Challenge ftmo2     # FTMO 2-step on the NDX100 CFD (results_ftmo2_cfd\)
+#   .\start_flex_search.ps1                 # default settings
+#   .\start_flex_search.ps1 -N1 40000       # more stage-1 configs per session
+#   .\start_flex_search.ps1 -Market cfd -Challenge ftmo2    # FTMO 2-step on the NDX100 CFD (results_ftmo2_cfd\)
 #
-# Stop:  Stop-Process -Id <PID printed at start>; re-run this script to resume
+# Progress:   Get-Content .\results\run.log -Tail 20 -Wait
+# Stop:       Stop-Process -Id <PID printed at start> (the pool workers exit with it); re-run this script to resume
 param(
-    [ValidateSet("nq", "cfd")] [string]$Market = "nq",
+    [ValidateSet("nq", "cfd")] [string]$Market = "nq",           # nq = NQ futures (FundedNext); cfd = NDX100 CFD (FTMO)
     [ValidateSet("flex", "ftmo2")] [string]$Challenge = "flex",
     [int]$Workers = 4,
     [int]$N1 = 30000,
@@ -28,7 +30,7 @@ if (-not $env:MR_NQ_PARQUET -and -not $env:MR_CFD_PARQUET -and -not (Test-Path $
     Write-Host "Copy the data file from the laptop to that path (data is not in git)." -ForegroundColor Red
     exit 1
 }
-# Use the Windows "py" launcher (plain "python" is the Microsoft Store stub on this VPS).
+# Use the Windows "py" launcher (the plain "python" command can be the Microsoft Store stub on this VPS).
 Write-Host "Using: $(py -3 --version 2>&1)"
 Write-Host "Checking Python packages (numpy, pandas, pyarrow, tzdata)..."
 py -3 -m pip install --quiet numpy pandas pyarrow tzdata
