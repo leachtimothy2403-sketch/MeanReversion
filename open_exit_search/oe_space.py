@@ -38,14 +38,30 @@ def heldout_days():
 # everything still open is closed (999 = session close). entry_tf: minutes in the opening candle (1 = live).
 PTS = dict(big_thr=[10, 15, 20, 25], big_sl=[25, 30, 35, 40, 50], big_tp=[0, 60, 80, 100, 115, 130, 150, 200],
            std_sl=[15, 20, 25, 30, 35], std_tp=[0, 30, 42, 50, 60, 80], leg_gap=[10, 15, 20, 25], leg_sl=[25, 35, 45],
-           leg_tp=[0, 60, 90, 115, 140])
+           leg_tp=[0, 60, 90, 115, 140], gap_min=[0, 20, 50, 100])
 MULT = dict(be_at=[0, 0.5, 1.0, 1.5, 2.0], partial=[0, 1.0, 1.5, 2.0, 3.0], trail=[0, 1.0, 1.5, 2.0, 3.0])
 CAT = dict(entry_tf=[1, 5], vwap=[True, False], time_stop=[60, 90, 120, 180, 240, 999], legs=[True, False],
-           leg_max=[1, 2, 4, 6], legs_mgmt=["fixed", "same"], leg_window=[30, 60, 120], ma=[0, 100], dyn=[False, True])
-ORDERED = set(PTS) | set(MULT) | {"time_stop", "leg_max", "leg_window"}
+           leg_max=[1, 2, 4, 6], legs_mgmt=["fixed", "same"], leg_window=[30, 60, 120], ma=[0, 100], dyn=[False, True],
+           entry_mode=["close", "pb"], pb_frac=[0.3, 0.5, 0.7], pb_wait=[5, 15, 30], gap=["off", "with", "against"],
+           body_min=[0, 0.3, 0.5, 0.7], volf=["off", "skip_low", "skip_high", "mid"], dow=["none", "mon", "fri"])
+# entry/filter knobs added 2026-09-25 (10-h version). volf: previous session range / median of the 20 before it
+# (skip_low: skip < 0.7, skip_high: skip > 1.5, mid: trade only 0.7..1.5). dow: skip Mondays / Fridays.
+# Filters are sampled 'off' with probability 0.5 (else uniform over the other values) so random configs are not
+# dominated by heavily filtered, low-frequency variants.
+FILTER_OFF = dict(entry_mode="close", gap="off", body_min=0, volf="off", dow="none")
+ORDERED = set(PTS) | set(MULT) | {"time_stop", "leg_max", "leg_window", "pb_frac", "pb_wait", "body_min"}
 KNOBS = list(CAT) + list(PTS) + list(MULT)
 def grid(k): return CAT.get(k) or PTS.get(k) or MULT[k]
-def sample(rng): return {k: grid(k)[rng.integers(len(grid(k)))] for k in KNOBS}
+def sample(rng):
+    P = {}
+    for k in KNOBS:
+        g = grid(k)
+        if k in FILTER_OFF:
+            others = [x for x in g if x != FILTER_OFF[k]]
+            P[k] = FILTER_OFF[k] if rng.random() < 0.5 else others[rng.integers(len(others))]
+        else:
+            P[k] = g[rng.integers(len(g))]
+    return P
 def neighbours(P, rng, n):
     out = []; keys = [k for k in KNOBS if len(grid(k)) > 1]
     for _ in range(n * 4):
@@ -58,7 +74,8 @@ def neighbours(P, rng, n):
 
 # live opening trade + FVG legs, exactly as the live bot (without its reversal trades)
 LIVE = dict(entry_tf=1, vwap=True, time_stop=120, legs=True, leg_max=6, legs_mgmt="fixed", leg_window=120, ma=0, dyn=False,
-            big_thr=15, big_sl=35, big_tp=115, std_sl=25, std_tp=42, leg_gap=15, leg_sl=35, leg_tp=115, be_at=0, partial=0, trail=0)
+            big_thr=15, big_sl=35, big_tp=115, std_sl=25, std_tp=42, leg_gap=15, leg_sl=35, leg_tp=115, be_at=0, partial=0, trail=0,
+            entry_mode="close", pb_frac=0.5, pb_wait=15, gap="off", gap_min=0, body_min=0, volf="off", dow="none")
 BASELINES = {"LIVE_COMP": LIVE, "LIVE_COMP+MA100": dict(LIVE, ma=100)}
 
 # ---- FTMO 2-step (stage 4) --------------------------------------------------------------------------------------

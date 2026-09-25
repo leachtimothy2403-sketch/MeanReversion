@@ -3,7 +3,8 @@ cache/
 __pycache__/
 logs/
 # stage-1 raw results are large; scales.json, stage0/2/3/4 CSVs and run.log are the ones to commit
-results*/stage1_*.csv
+results*/**/stage1_*.csv
 results*/DONE
 # laptop smoke test
 results_test*/
+results_smoke/
